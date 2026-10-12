@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Mechanically extract acceptance-criteria checkboxes from a PR/issue body.
 
-This is the externally-grounded signal that ``ai-spec-validation.yml`` should
-gate on (issue #1855). The LLM critic may still annotate *why* a criterion is
-unmet, but the pass/fail decision is determined here:
+This is the externally-grounded signal that ``ai-spec-validation.yml`` gates
+on, through ``scripts/ci/spec_coverage_verdict.py`` (issues #1855 and #6182).
+The LLM critic may still annotate *why* a criterion is unmet, but the pass/fail
+decision is determined here:
 
 * Parse Markdown task-list items under an "Acceptance" / "Acceptance Criteria"
   heading.
@@ -31,11 +32,17 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# The repository root goes first on the path so the CLI form
+# (python3 scripts/external_signals/acceptance_criteria.py) can import its sibling.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from scripts.external_signals.markdown_visibility import scan_hidden
+
 _ACCEPTANCE_HEADING = re.compile(
-    r"^#{1,6}\s*acceptance(?:\s+criteria)?\s*$",
+    r"^(?P<hashes>#{1,6})\s*acceptance(?:\s+criteria)?\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
-_NEXT_HEADING = re.compile(r"^#{1,6}\s+\S", re.MULTILINE)
+_ANY_HEADING = re.compile(r"^(?P<hashes>#{1,6})\s+\S", re.MULTILINE)
 _CHECKBOX = re.compile(r"^\s*[-*]\s*\[(?P<mark>[ xX])\]\s+(?P<text>.+?)\s*$")
 
 
@@ -69,16 +76,68 @@ class Report:
         }
 
 
-def extract_acceptance_section(body: str) -> str:
-    """Return the text between an ``## Acceptance`` heading and the next heading."""
+def _section_bounds(visible: str) -> tuple[int, int] | None:
+    """Return the character span of the acceptance section in ``visible``, or None.
 
-    match = _ACCEPTANCE_HEADING.search(body)
+    The span starts after the heading and ends at the next heading of the same
+    or higher level (equal or fewer ``#``), so ``###`` sub-headings stay inside.
+    """
+
+    match = _ACCEPTANCE_HEADING.search(visible)
     if not match:
-        return ""
-    start = match.end()
-    tail = body[start:]
-    next_heading = _NEXT_HEADING.search(tail)
-    return tail[: next_heading.start()] if next_heading else tail
+        return None
+    level = len(match.group("hashes"))
+    for heading in _ANY_HEADING.finditer(visible, match.end()):
+        if len(heading.group("hashes")) <= level:
+            return match.end(), heading.start()
+    return match.end(), len(visible)
+
+
+def extract_acceptance_section(body: str) -> str:
+    """Return the text under an ``Acceptance`` heading, up to its end.
+
+    Fenced code and HTML comments are blanked first (``markdown_visibility.scan_hidden``), so a
+    heading or a checkbox inside either is not part of the section.
+    """
+
+    visible = scan_hidden(body)[0]
+    bounds = _section_bounds(visible)
+    return "" if bounds is None else visible[bounds[0] : bounds[1]]
+
+
+def acceptance_heading_count(body: str) -> int:
+    """Count acceptance headings in the raw body, hidden or not.
+
+    A scan that hides one heading can make a second one the graded section.
+    Callers that gate on the boxes fail closed when this is above one.
+    """
+
+    return len(_ACCEPTANCE_HEADING.findall(body))
+
+
+def hidden_unchecked(body: str) -> list[str]:
+    """Return unchecked boxes in the acceptance section that the scan blanked.
+
+    The scan is line based and cannot match every case GitHub renders, so a box
+    it hides may still show on GitHub. Only an unchecked one could turn a FAIL
+    into a PASS, so callers that gate on the boxes fail closed on this list. The
+    scan keeps the line count, so raw and visible lines align by index.
+    """
+
+    visible = scan_hidden(body)[0]
+    bounds = _section_bounds(visible)
+    if bounds is None:
+        return []
+    first = visible.count("\n", 0, bounds[0])
+    last = visible.count("\n", 0, bounds[1])
+    raw_lines = body.split("\n")
+    shown = visible.split("\n")
+    hidden: list[str] = []
+    for index in range(first, last + 1):
+        match = _CHECKBOX.match(raw_lines[index])
+        if match and match.group("mark") == " " and not _CHECKBOX.match(shown[index]):
+            hidden.append(match.group("text"))
+    return hidden
 
 
 def parse_criteria(body: str) -> list[Criterion]:

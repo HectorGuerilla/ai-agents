@@ -33,7 +33,7 @@ rebases and pure refactors into their own commits or PRs.
 ## Specification References
 
 <!-- Enable AI spec-to-implementation traceability -->
-<!-- The ai-spec-validation workflow checks for these references -->
+<!-- The ai-spec-validation and ai-spec-review workflows read these references -->
 
 | Type | Reference | Description |
 |------|-----------|-------------|
@@ -72,9 +72,11 @@ For other PRs: Add references when traceability adds value.
 <!--
 The Validate Spec Coverage job reads `- [ ]` checkboxes from this section of
 the PR body. Numbered lists are not recognized. Check a box only once the
-criterion is actually met; an unchecked box makes the spec-coverage signal
-report FAIL (non-blocking). Replace the placeholder with the criteria this
-PR must satisfy.
+criterion is actually met; when the PR links a spec or an issue, an unchecked
+box or a missing section makes the check report FAIL (advisory, not a required
+check). Replace the placeholder with the criteria this PR must satisfy. A PR
+that links a spec or an issue must keep this checkbox section, and editing the
+body re-runs the check.
 
 Write criteria a reader can check against the diff. Evidence that a command
 ran ("`uv run python scripts/validation/pre_pr.py` passes") belongs under
