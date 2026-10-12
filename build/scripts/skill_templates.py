@@ -148,6 +148,12 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from atomic_write import publish_bytes_atomically  # noqa: E402
 from regen_guard import detect_reason  # noqa: E402
+from skill_distribution import (  # noqa: E402
+    SkillDistributionError,
+    install_target_symlink_error,
+    is_repo_local,
+    render_target,
+)
 from skill_template_grammar import (  # noqa: E402,F401 (F401: re-exported for callers)
     _SLUG,
     MissingPartialError,
@@ -252,6 +258,13 @@ def _name_validation_error(repo_root: Path, name: str, tmpl_path: Path) -> str |
             f"outside {resolved_root}"
         )
 
+    try:
+        repo_local = is_repo_local(repo_root, name)
+    except SkillDistributionError as exc:
+        return str(exc)
+    if repo_local:
+        symlink_error: str | None = install_target_symlink_error(repo_root, name, tmpl_path)
+        return symlink_error
     return _plugin_tree_error(repo_root, name, tmpl_path, resolved_repo)
 
 
@@ -353,7 +366,11 @@ def owned_targets(repo_root: Path) -> set[Path]:
     """
     names = discover(repo_root)
     install = {repo_root / ".claude" / "skills" / name / "SKILL.md" for name in names}
-    plugin = {repo_root / "src" / "claude" / "skills" / name / "SKILL.md" for name in names}
+    plugin = {
+        repo_root / "src" / "claude" / "skills" / name / "SKILL.md"
+        for name in names
+        if not is_repo_local(repo_root, name)
+    }
     return install | plugin
 
 
@@ -441,7 +458,7 @@ def compile_all(repo_root: Path, *, validate: bool, what_if: bool = False) -> Co
     _report_discover_errors(repo_root, result)
 
     for name, tmpl_path in sorted(discover(repo_root).items()):
-        target = repo_root / "src" / "claude" / "skills" / name / "SKILL.md"
+        target = render_target(repo_root, name)
 
         reason = detect_reason(target)
         if reason is not None:

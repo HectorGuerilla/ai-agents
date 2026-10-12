@@ -31,6 +31,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 from binplace_manifest import is_bytecode_artifact  # noqa: E402
 from copilot_body_translation import translate_skill_file  # noqa: E402
 from regen_guard import detect_reason as regen_detect_reason  # noqa: E402
+from skill_distribution import SkillDistributionError, repo_local_names  # noqa: E402
 
 _DEFAULT_EXCLUDES = ("AGENTS.md", "CLAUDE.md")
 
@@ -65,12 +66,16 @@ class SkillSupportSyncError(GenerateSkillsError):
     """
 
 
-def _iter_skill_sources(source_dir: Path, excludes: set[str]) -> list[Path]:
+def _iter_skill_sources(
+    source_dir: Path, excludes: set[str], skip_names: frozenset[str] = frozenset()
+) -> list[Path]:
     """Return immediate subdirectories that contain a SKILL.md file.
 
     Excludes top-level files (AGENTS.md / CLAUDE.md). The check is by
     presence of a SKILL.md inside the immediate child directory; nested
-    skill-like layouts are not recursed.
+    skill-like layouts are not recursed. ``skip_names`` drops skills flagged
+    ``distribution: repo-local`` (``skill_distribution.repo_local_names``):
+    they stay under ``.claude/skills/`` and reach no vendor plugin tree.
     """
     if not source_dir.is_dir():
         raise GenerateSkillsError(f"sourceDir not found: {source_dir}")
@@ -78,7 +83,7 @@ def _iter_skill_sources(source_dir: Path, excludes: set[str]) -> list[Path]:
     for child in sorted(source_dir.iterdir()):
         if not child.is_dir():
             continue
-        if child.name in excludes:
+        if child.name in excludes or child.name in skip_names:
             continue
         if not (child / "SKILL.md").is_file():
             continue
@@ -336,6 +341,63 @@ def _prune_stale_support_files(
     return removed, errors
 
 
+def prune_repo_local_vendor_copies(
+    tree_root: Path, names: frozenset[str], *, check: bool = False, what_if: bool = False
+) -> tuple[int, list[str]]:
+    """Remove ``tree_root/<name>/`` for each repo-local skill name still present there.
+
+    A skill that becomes ``distribution: repo-local`` in an existing checkout
+    leaves its old vendor copy behind, and binplace never deletes. This
+    reconciles ``src/claude/skills`` and ``src/copilot-cli/skills`` (the two
+    callers' ``tree_root``) with the flag. It touches only ``tree_root/<name>``
+    for the given names, so a shipped skill is never affected. A symlinked
+    skill directory, or a symlink anywhere inside it, is refused as an error
+    (CWE-22/59) and left in place, like :func:`_iter_support_relpaths`.
+
+    ``check`` and ``what_if`` delete nothing: each file that would go is
+    reported and counted. Returns ``(files removed or reported, errors)``.
+    """
+    removed = 0
+    errors: list[str] = []
+    for name in sorted(names):
+        skill_dir = tree_root / name
+        if Path(name).name != name or not (skill_dir.is_symlink() or skill_dir.is_dir()):
+            continue
+        try:
+            files = _vendor_copy_files(skill_dir)
+        except SkillSupportSyncError as exc:
+            errors.append(str(exc))
+            continue
+        for path in files:
+            if check or what_if:
+                print(f"  {'DRIFT' if check else 'Would remove'}: {path} (repo-local skill)")
+                removed += 1
+                continue
+            try:
+                path.unlink()
+                removed += 1
+            except OSError as exc:
+                errors.append(f"{path}: could not remove repo-local vendor copy: {exc}")
+        if not (check or what_if):
+            _prune_empty_dirs(skill_dir)
+            if skill_dir.is_dir() and not any(skill_dir.iterdir()):
+                skill_dir.rmdir()
+    return removed, errors
+
+
+def _vendor_copy_files(skill_dir: Path) -> list[Path]:
+    """Return every file under ``skill_dir``; raise on any symlink, including ``skill_dir``."""
+    if skill_dir.is_symlink():
+        raise SkillSupportSyncError(f"{skill_dir}: symlinked skill directory refused")
+    files: list[Path] = []
+    for path in sorted(skill_dir.rglob("*")):
+        if path.is_symlink():
+            raise SkillSupportSyncError(f"{path}: symlink inside a skill directory refused")
+        if not path.is_dir():
+            files.append(path)
+    return files
+
+
 def sync_claude_plugin_skill_support(
     repo_root: Path, *, what_if: bool = False, check: bool = False
 ) -> tuple[int, int, int, list[str]]:
@@ -344,7 +406,11 @@ def sync_claude_plugin_skill_support(
     ``.claude/skills/<name>/`` stays the canonical, hand-maintained source
     for scripts, references, tests, and any other support file (ADR-109's
     lib exception applies the same pattern here: imported/hand-written code
-    stays at its existing location, and the build owns the copy).
+    stays at its existing location, and the build owns the copy). A skill
+    flagged ``distribution: repo-local`` is not mirrored: its support files
+    stay only under ``.claude/skills/<name>/``, and a stale
+    ``src/claude/skills/<name>/`` left by a skill that just became repo-local is
+    removed (reported as drift under ``check``).
     ``src/claude/skills/<name>/SKILL.md`` is rendered separately by
     ``skill_templates.compile_all`` and is never touched here (``SKILL.md``
     is always excluded, via ``_copy_skill_tree``'s ``skip_filenames``).
@@ -382,14 +448,20 @@ def sync_claude_plugin_skill_support(
     source_dir = repo_root / _CLAUDE_SUPPORT_SOURCE_REL
     target_dir = repo_root / _CLAUDE_SUPPORT_TARGET_REL
     try:
-        skills = _iter_skill_sources(source_dir, set(_DEFAULT_EXCLUDES))
+        repo_local = repo_local_names(repo_root)
+    except SkillDistributionError as exc:
+        return (0, 0, 0, [str(exc)])
+    try:
+        skills = _iter_skill_sources(source_dir, set(_DEFAULT_EXCLUDES), repo_local)
     except GenerateSkillsError:
         return (0, 0, 0, [])
 
     total_written = 0
-    total_removed = 0
     total_skipped = 0
     errors: list[str] = []
+    total_removed, errors = prune_repo_local_vendor_copies(
+        target_dir, repo_local, check=check, what_if=what_if
+    )
     for src in skills:
         try:
             wanted = _iter_support_relpaths(src)

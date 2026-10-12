@@ -51,6 +51,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 import skill_templates  # noqa: E402
+from skill_distribution import SkillDistributionError, repo_local_names  # noqa: E402
 
 # _copy_skill_tree, GenerateSkillsError, SkillSupportSyncError,
 # _iter_skill_sources, _DEFAULT_EXCLUDES, and sync_claude_plugin_skill_support
@@ -64,6 +65,7 @@ from skill_support_mirror import (  # noqa: E402,F401
     SkillSupportSyncError,
     _copy_skill_tree,
     _iter_skill_sources,
+    prune_repo_local_vendor_copies,
     sync_claude_plugin_skill_support,
 )
 from yaml_loader import ConfigError, load_platform_config, validate_relative_path  # noqa: E402
@@ -246,14 +248,30 @@ def generate_skills(
     start_time = time.monotonic()
 
     try:
-        skills = _iter_skill_sources(source_dir, excludes)
+        repo_local = repo_local_names(repo_root)
+        skills = _iter_skill_sources(source_dir, excludes, repo_local)
     except GenerateSkillsError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    except SkillDistributionError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
     if not skills:
         print(f"Error: no skills with SKILL.md found under {source_dir}", file=sys.stderr)
         return 1
+
+    stale, stale_errors = prune_repo_local_vendor_copies(
+        output_dir, repo_local, check=validate, what_if=what_if
+    )
+    if stale_errors:
+        for err in stale_errors:
+            print(f"Error: {err}", file=sys.stderr)
+        return 1
+    if stale:
+        print(f"Repo-local vendor copies {'drift' if validate else 'removed'}: {stale}")
+        if validate:
+            return 1
 
     is_copilot = str(cfg.get("provider", "")) == "copilot-cli"
     print(f"Found {len(skills)} skill(s)")

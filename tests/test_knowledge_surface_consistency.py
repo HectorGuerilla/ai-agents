@@ -28,9 +28,9 @@ _KNOWLEDGE_PERSISTENCE_SURFACES = (
     REPO_ROOT / ".github" / "instructions" / "knowledge-persistence.instructions.md",
     REPO_ROOT / "src" / "copilot-cli" / "instructions" / "knowledge-persistence.instructions.md",
 )
+# ai-agents-architecture-contract is distribution: repo-local: no Copilot mirror.
 _ARCHITECTURE_SKILL_SURFACES = (
     REPO_ROOT / ".claude" / "skills" / "ai-agents-architecture-contract" / "SKILL.md",
-    REPO_ROOT / "src" / "copilot-cli" / "skills" / "ai-agents-architecture-contract" / "SKILL.md",
 )
 _DRIFT_MEMORIES = (
     REPO_ROOT / ".serena" / "memories" / "agents-two-pipeline-mirror-recipe.md",
