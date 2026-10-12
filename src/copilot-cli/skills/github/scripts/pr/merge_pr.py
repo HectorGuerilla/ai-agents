@@ -82,6 +82,9 @@ _SCRIPT_NAME = "merge_pr.py"
 _EXIT_NOT_MERGEABLE = 100
 # Matched case-insensitively against the stdout and stderr of a failed PR view.
 _NOT_FOUND_MARKERS = ("could not resolve to a pullrequest", "not found")
+# gh reports a missing repository as "Could not resolve to a Repository".
+# A wrong repository never resolves on retry, so it is a config error (ADR-035).
+_REPO_NOT_FOUND_MARKER = "could not resolve to a repository"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -302,6 +305,11 @@ def _is_not_found(gh_output: str) -> bool:
     return any(marker in lowered for marker in _NOT_FOUND_MARKERS)
 
 
+def _is_repo_not_found(gh_output: str) -> bool:
+    """Return True when failed gh output says the repository does not exist."""
+    return _REPO_NOT_FOUND_MARKER in gh_output.lower()
+
+
 def _fetch_pr_state(
     pr: int,
     repo_flag: str,
@@ -328,6 +336,14 @@ def _fetch_pr_state(
     if pr_result.returncode != 0:
         output = pr_result.stderr or pr_result.stdout
         combined = f"{pr_result.stdout}\n{pr_result.stderr}"
+        if _is_repo_not_found(combined):
+            _emit_error(
+                f"Repository {repo_flag} not found: {sanitize_failure_detail(combined)}",
+                2,
+                "NotFound",
+                output_format,
+                pr,
+            )
         if _is_not_found(combined):
             # Keep gh's words: a 404 from a wrong host or repo also lands here.
             _emit_error(
@@ -852,6 +868,15 @@ def _resolve_strategy(
     try:
         repo_settings = get_allowed_merge_methods(repo_flag)
     except (RuntimeError, ValueError) as exc:
+        if _is_not_found(str(exc)):
+            # repos/<owner>/<repo> answers 404 only when the repository is absent.
+            _emit_error(
+                f"Repository {repo_flag} not found: {sanitize_failure_detail(str(exc))}",
+                2,
+                "NotFound",
+                args.output_format,
+                pr,
+            )
         _emit_error(str(exc), 3, "ApiError", args.output_format, pr)
     chosen = resolve_default_strategy(repo_settings)
     if chosen is None:
