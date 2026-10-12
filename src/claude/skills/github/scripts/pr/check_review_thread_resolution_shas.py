@@ -49,6 +49,7 @@ except ImportError:  # pragma: no cover - exercised when markdown-it-py is missi
 
 _MAX_THREAD_PAGES = 50
 _SHA_RE = re.compile(r"\b([0-9a-f]{7,40})\b", re.IGNORECASE)
+_COMMIT_URL_RE = re.compile(r"/commits?/([0-9a-f]{7,40})\b", re.IGNORECASE)
 
 _THREADS_QUERY = """\
 query($owner: String!, $repo: String!, $prNumber: Int!, $cursor: String) {
@@ -106,8 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
 # hide hex IDs in HTML comments (CodeRabbit: <!-- cr-comment:v1:<24 hex> -->).
 # markdown-it-py parses the body; html.parser reads raw HTML blocks. Fenced and
 # indented code blocks are skipped on purpose, since they quote commands, not fix
-# references. Link targets are scanned: a link to a commit, or a used footnote
-# naming one, cites that commit. Unused definitions do not render, so they are not.
+# references. A link target counts only when its URL names a commit
+# (/commit/<sha>); unused reference definitions do not render, so they are not read.
 class _HtmlText(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -115,6 +116,15 @@ class _HtmlText(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         self.parts.append(data)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.parts.extend(_commit_refs(value) for name, value in attrs if name == "href" and value)
+
+
+def _commit_refs(url: str) -> str:
+    # A link cites a commit only through a /commit/<sha> path. Other URL parts
+    # (attachment UUIDs, comment IDs) are hex-like but are not commits.
+    return " ".join(_COMMIT_URL_RE.findall(url))
 
 
 def _html_block_text(html: str) -> str:
@@ -140,9 +150,11 @@ def _inline_text(token: Token) -> str:
         elif child.type in ("softbreak", "hardbreak"):
             parts.append("\n")
         elif child.type == "link_open":
-            parts.append(f" {child.attrs.get('href', '')} ")
+            parts.append(f" {_commit_refs(str(child.attrs.get('href', '')))} ")
         elif child.type == "html_inline" and child.content.startswith("<!--"):
             parts.append(" " if _is_gfm_comment(child.content) else child.content)
+        elif child.type == "html_inline":
+            parts.append(f" {_html_block_text(child.content)} ")
         else:
             parts.append(" ")
     return "".join(parts)
@@ -158,10 +170,14 @@ def _reached_nesting_limit(tokens: list[Token], max_nesting: int) -> bool:
 def _visible_text(body: str) -> str:
     if _MARKDOWN is None:
         return body
-    tokens = _MARKDOWN.parse(body)
+    env: dict[str, Any] = {}
+    tokens = _MARKDOWN.parse(body, env)
     if _reached_nesting_limit(tokens, _MARKDOWN.options["maxNesting"]):
         return body
-    parts: list[str] = []
+    # The commonmark preset reads "[^1]: text" as a link definition, but GitHub
+    # renders it as a visible footnote, so its text is read here.
+    references = env.get("references", {}).items()
+    parts = [f"{ref['href']} {ref['title']}" for label, ref in references if label.startswith("^")]
     for token in tokens:
         if token.type == "inline":
             parts.append(_inline_text(token))
@@ -340,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     if _MARKDOWN is None:
         print(
             "markdown-it-py not installed; scanning raw comment bodies. "
-            "Hidden bot IDs may report as invalid.",
+            "Hidden bot IDs may report as invalid. Install markdown-it-py to fix.",
             file=sys.stderr,
         )
 
