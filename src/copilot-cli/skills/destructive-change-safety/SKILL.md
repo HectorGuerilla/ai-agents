@@ -81,7 +81,7 @@ call sites checked.
 | Sink | Preflight |
 |------|-----------|
 | SQLite DELETE or UPDATE | `preview-sql --database <file> --statement "<sql>"` runs it on an in-memory copy. `count` is rows hit, `total_changes` includes cascades and triggers. |
-| Files | `preview-files --root <dir> --pattern "<glob>"` lists what the glob selects, refuses patterns that leave the root, and ignores symlinks that do. |
+| Files | `preview-files --root <dir> --pattern "<glob>"` lists what the glob selects (a matched directory counts every file below it), refuses patterns that leave the root, and ignores symlinks that do. |
 | Other engine, remote resource | Use the system's own dry run, plan, or `SELECT COUNT`. Record the command and its real output. |
 
 A preview that cannot run exits 1 with `scope unknown`. If the platform has no
@@ -123,11 +123,12 @@ python3 "${COPILOT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-.claude}}/skills/destructi
 | Verdict | Exit | Meaning |
 |---------|------|---------|
 | `PASS` | 0 | Every sink traced, scope measured and as expected, rollback stated, checks green. Execution may proceed. |
-| `SKIP` | 0 | No sink declared or scanned. |
+| `SKIP` | 0 | No sink declared, and the supplied scan decided `skip`. |
 | `BLOCK` | 1 | `reasons` lists each failure. Fix the evidence, or stop. |
 
 Passing `--scan` makes the gate require an evidence entry for every scanned
-sink, so an agent cannot omit one. Cardinality outside `expected`, a
+sink, so an agent cannot omit one. Evidence that declares no sink blocks unless
+`--scan` supplies a report with `"decision": "skip"`. Cardinality outside `expected`, a
 missing or failed preflight, no rollback, an irreversible step without human
 approval, or a failed check blocks. There is no override here; a break-glass
 path is a repository policy decision outside this skill.

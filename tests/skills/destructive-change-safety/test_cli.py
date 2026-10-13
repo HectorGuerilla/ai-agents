@@ -119,6 +119,15 @@ def test_read_only_change_skips_cleanly(read_only_repo: Path, tmp_path: Path) ->
     assert json.loads(gate.stdout)["verdict"] == "SKIP"
 
 
+def test_gate_without_a_scan_blocks_empty_evidence(tmp_path: Path) -> None:
+    gate = run("gate", "--evidence", write_json(tmp_path / "ev.json", {}))
+    assert gate.returncode == 1
+    assert json.loads(gate.stdout)["verdict"] == "BLOCK"
+    scan = write_json(tmp_path / "scan.json", {})
+    blocked = run("gate", "--evidence", write_json(tmp_path / "ev2.json", {}), "--scan", scan)
+    assert blocked.returncode == 1
+
+
 def test_irreversible_operation_blocks_until_a_human_approves(tmp_path: Path) -> None:
     evidence = evidence_for(1, 1, "revoke.py:9")
     evidence["rollback"] = {"kind": "irreversible"}

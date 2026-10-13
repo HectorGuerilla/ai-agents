@@ -32,9 +32,38 @@ def test_complete_evidence_passes() -> None:
     assert verdict(good_evidence()) == {"verdict": "PASS", "reasons": []}
 
 
-def test_read_only_change_skips() -> None:
-    assert verdict({})["verdict"] == "SKIP"
+def test_read_only_change_skips_only_with_a_skip_scan() -> None:
     assert verdict({}, {"decision": "skip", "sinks": []})["verdict"] == "SKIP"
+
+
+def test_declaring_no_sinks_without_a_scan_blocks() -> None:
+    result = verdict({})
+    assert result["verdict"] == "BLOCK"
+    assert "no scan report" in result["reasons"][0]
+
+
+@pytest.mark.parametrize(
+    "scan",
+    [
+        {},
+        {"sinks": []},
+        {"decision": "maybe", "sinks": []},
+        {"decision": None, "sinks": []},
+        {"decision": "activate", "sinks": []},
+        {"decision": "skip", "sinks": "none"},
+    ],
+)
+def test_empty_evidence_with_a_malformed_or_inconclusive_scan_blocks(
+    scan: dict[str, Any],
+) -> None:
+    assert verdict({}, scan)["verdict"] == "BLOCK"
+
+
+def test_skip_scan_still_runs_every_rule_over_declared_sinks() -> None:
+    assert verdict(good_evidence(), {"decision": "skip", "sinks": []})["verdict"] == "PASS"
+    evidence = good_evidence()
+    del evidence["preflight"]
+    assert verdict(evidence, {"decision": "skip", "sinks": []})["verdict"] == "BLOCK"
 
 
 def test_scan_sinks_the_evidence_omits_block() -> None:

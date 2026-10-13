@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Non-destructive scope previews (destructive-change-safety).
 
-``preview_files`` lists what a glob would touch under a root. ``preview_sql``
-runs one SQLite DELETE or UPDATE against an in-memory copy of the database and
-reports the rows it changed. Neither writes to the target. A preview that
-cannot run raises ``PreviewError``; the caller reports unknown scope, which the
-gate blocks.
+``preview_files`` lists what a glob would touch under a root; a matched
+directory counts every file below it, because recursive deletes remove them.
+``preview_sql`` runs one SQLite DELETE or UPDATE against an in-memory copy of
+the database and reports the rows it changed. Neither writes to the target. A
+preview that cannot run raises ``PreviewError``; the caller reports unknown
+scope, which the gate blocks.
 
 EXIT CODES (ADR-035), through ``destructive_gate.py``:
     0 - Preview produced a count
@@ -26,6 +27,16 @@ class PreviewError(Exception):
     """The scope could not be measured without risk."""
 
 
+def files_under(item: Path, base: Path) -> list[str]:
+    """Return the files ``item`` names: itself, or every file below a matched directory."""
+    members = [item, *item.rglob("*")] if item.is_dir() else [item]
+    return [
+        member.relative_to(base).as_posix()
+        for member in members
+        if member.is_file() and member.resolve().is_relative_to(base)
+    ]
+
+
 def preview_files(root: Path, patterns: list[str]) -> dict[str, object]:
     """Return the files under ``root`` that ``patterns`` select, never touching them."""
     if not root.is_dir():
@@ -36,9 +47,8 @@ def preview_files(root: Path, patterns: list[str]) -> dict[str, object]:
         if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
             raise PreviewError(f"pattern escapes the root: {pattern}")
         for item in base.glob(pattern):
-            resolved = item.resolve()
-            if item.is_file() and resolved.is_relative_to(base):
-                selected.add(item.relative_to(base).as_posix())
+            if item.resolve().is_relative_to(base):
+                selected.update(files_under(item, base))
     files = sorted(selected)
     return {"kind": "files", "root": str(base), "count": len(files), "files": files}
 

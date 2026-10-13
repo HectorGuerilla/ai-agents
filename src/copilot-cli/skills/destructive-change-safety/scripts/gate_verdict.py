@@ -13,9 +13,10 @@ Evidence is a JSON object the agent assembles from real command output:
       "checks": [{"command": "pytest ...", "exit_code": 0}]
     }
 
-``PASS`` means every rule held. ``SKIP`` means no sink was declared and, when a
-scan report is supplied, the scan found none. ``BLOCK`` carries every reason.
-Missing evidence blocks; it never defaults to pass.
+``PASS`` means every rule held. ``SKIP`` means no sink was declared and a scan
+report with decision ``skip`` found none; a missing or malformed scan report
+blocks. ``BLOCK`` carries every reason. Missing evidence blocks; it never
+defaults to pass.
 
 EXIT CODES (ADR-035), through ``destructive_gate.py``:
     0 - PASS or SKIP
@@ -146,6 +147,17 @@ RULES: tuple[Rule, ...] = (
 )
 
 
+def skip_blockers(scan_report: Evidence | None) -> list[str]:
+    """Reasons the scan report cannot support a SKIP: missing, malformed, or not ``skip``."""
+    if scan_report is None:
+        return ["no scan report: a read-only change cannot be proven without one"]
+    if not isinstance(scan_report.get("sinks"), list):
+        return ["scan report `sinks` must be a list: scope is unknown"]
+    if scan_report.get("decision") != "skip":
+        return ["scan report decision is not skip: scope is unknown"]
+    return []
+
+
 def evaluate(evidence: Evidence, scan_report: Evidence | None = None) -> dict[str, object]:
     """Return ``{"verdict", "reasons"}`` for the evidence and optional scan report."""
     scanned = [str(as_dict(s).get("location")) for s in as_list((scan_report or {}).get("sinks"))]
@@ -157,6 +169,9 @@ def evaluate(evidence: Evidence, scan_report: Evidence | None = None) -> dict[st
     if "sinks" in evidence and not isinstance(evidence["sinks"], list):
         return {"verdict": "BLOCK", "reasons": ["evidence `sinks` must be a list"]}
     if not as_list(evidence.get("sinks")) and not scanned:
+        blockers = skip_blockers(scan_report)
+        if blockers:
+            return {"verdict": "BLOCK", "reasons": blockers}
         return {"verdict": "SKIP", "reasons": ["no destructive sink declared or scanned"]}
     reasons = [reason for rule in RULES for reason in rule(evidence, scanned)]
     return {"verdict": "BLOCK" if reasons else "PASS", "reasons": reasons}

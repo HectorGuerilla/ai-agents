@@ -139,3 +139,30 @@ def test_file_preview_ignores_symlinks_that_leave_the_root(tmp_path: Path) -> No
 def test_file_preview_refuses_a_missing_root(tmp_path: Path) -> None:
     with pytest.raises(scope_preflight.PreviewError, match="not a directory"):
         scope_preflight.preview_files(tmp_path / "gone", ["*"])
+
+
+def test_file_preview_expands_a_matched_directory_to_its_files(tmp_path: Path) -> None:
+    make_tree(tmp_path)
+    (tmp_path / "cache" / "deep").mkdir()
+    (tmp_path / "cache" / "deep" / "c.bin").write_text("c", encoding="utf-8")
+    result = scope_preflight.preview_files(tmp_path, ["cache"])
+    assert result["count"] == 3
+    assert result["files"] == ["cache/a.tmp", "cache/b.tmp", "cache/deep/c.bin"]
+
+
+def test_file_preview_of_an_empty_directory_counts_no_files(tmp_path: Path) -> None:
+    (tmp_path / "empty").mkdir()
+    assert scope_preflight.preview_files(tmp_path, ["empty"])["count"] == 0
+
+
+def test_file_preview_does_not_follow_a_directory_symlink_out_of_the_root(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.tmp").write_text("s", encoding="utf-8")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "link").symlink_to(outside, target_is_directory=True)
+    assert scope_preflight.preview_files(root, ["link"])["count"] == 0
+    assert scope_preflight.preview_files(root, ["link/*"])["count"] == 0
