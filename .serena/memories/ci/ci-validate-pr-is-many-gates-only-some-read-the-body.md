@@ -223,7 +223,9 @@ trailing period matches; bare `eg` does not. The cue must sit on the **same
 line** as the path, separated only by spaces, tabs, colons, and opening
 parentheses (`[: \t(]*`). A closing parenthesis between cue and path breaks the
 match. A cue on the previous line does nothing, deliberately: it keeps a
-citation from suppressing the list item under it.
+citation from suppressing the list item under it. The backtick span must end
+at the extension, or at an optional `:LINE` or `:LINE:COL` suffix right after it
+(issue #5550): ``see `a.py:71` `` is stripped like ``see `a.py` ``.
 
 Escape hatch of last resort: the `description-validation-bypass` label. It suppresses
 **file-mention** CRITICALs and downgrades the verdict to `BYPASSED`, which is recorded
