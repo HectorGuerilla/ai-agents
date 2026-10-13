@@ -1941,6 +1941,71 @@ class TestAsyncMergeForStack:
         assert "unreviewed" in message
         assert env["Data"].get("state") != "MERGED"
 
+    @pytest.mark.parametrize(
+        ("put", "polls", "timeout"),
+        [
+            (None, [_completed(stdout=_async_body("pending"))], 0),
+            (subprocess.TimeoutExpired(["gh"], 30), None, 120.0),
+            (None, [_completed(stdout=_async_body("failed", message="late"))], 120.0),
+            (None, [_completed(stdout=_async_body("weird"))], 120.0),
+            (None, [_completed(rc=1, stderr="HTTP 502")], 120.0),
+        ],
+        ids=["poll-timeout", "put-timeout", "failed-status", "unknown-status", "poll-errors"],
+    )
+    def test_head_moved_is_caught_when_the_readback_recovers_a_failed_wait(
+        self, capsys, put, polls, timeout
+    ):
+        fake = _StackGh(
+            put=put,
+            polls=polls,
+            listings=[
+                [_member(40), _member(50)],
+                [_member(40), _member(50)],
+                [_member(40, "closed", salt=1), _member(50, "closed")],
+            ],
+        )
+        with patch.object(_mod, "_ASYNC_POLL_TIMEOUT_SECONDS", timeout):
+            code, env = _run_stack(fake, capsys)
+        assert code == 3
+        message = json.dumps(env)
+        assert "#40" in message
+        assert "unreviewed" in message
+        assert env["Data"].get("recovered") is not True
+        assert env["Data"].get("state") != "MERGED"
+
+    def test_unreadable_listing_hides_the_pin_check_when_recovering(self, capsys):
+        fake = _StackGh(
+            members=[_member(40), _member(50)],
+            polls=[_completed(stdout=_async_body("pending"))],
+        )
+        original_api = fake._api
+        reads = {"stacks": 0}
+
+        def flaky(cmd):
+            path = next(part for part in cmd if part.startswith("repos/"))
+            if "/stacks/" in path:
+                reads["stacks"] += 1
+                if reads["stacks"] >= 3:
+                    return _completed(rc=1, stderr="HTTP 502")
+            return original_api(cmd)
+
+        fake._api = flaky
+        with patch.object(_mod, "_ASYNC_POLL_TIMEOUT_SECONDS", 0):
+            code, env = _run_stack(fake, capsys)
+        assert code == 3
+        assert "unverified" in json.dumps(env)
+        assert env["Data"].get("recovered") is not True
+
+    def test_unmoved_heads_still_recover_after_a_failed_wait(self, capsys):
+        fake = _StackGh(
+            polls=[_completed(stdout=_async_body("pending"))],
+            listings=[[_member(40), _member(50)]],
+        )
+        with patch.object(_mod, "_ASYNC_POLL_TIMEOUT_SECONDS", 0):
+            code, env = _run_stack(fake, capsys)
+        assert code == 0
+        assert env["Data"]["recovered"] is True
+
     def test_unreadable_listing_after_the_merge_is_not_reported_as_success(self, capsys):
         fake = _StackGh(members=[_member(40), _member(50)])
         original_api = fake._api

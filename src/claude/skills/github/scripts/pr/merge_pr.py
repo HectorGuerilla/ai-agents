@@ -189,7 +189,16 @@ _RESIDUAL_RISK = (
 class _MergeFailureError(Exception):
     """A merge attempt failed in a way the readback must adjudicate."""
 
-    def __init__(self, message: str, code: int, error_type: str, *, landed: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        code: int,
+        error_type: str,
+        *,
+        landed: bool = False,
+        stack: int = 0,
+        pins: dict[int, str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.code = code
@@ -197,6 +206,10 @@ class _MergeFailureError(Exception):
         # True when the merge landed but a post-merge check found a problem; the
         # readback must then report the failure instead of recovering to success.
         self.landed = landed
+        # The gated downstack heads of a stack merge. When set, a MERGED readback
+        # is not trusted until each head still matches its pin.
+        self.stack = stack
+        self.pins = pins
 
 
 @dataclass(frozen=True)
@@ -977,7 +990,11 @@ def _merge_stack_async(
     Returns when GitHub reports merged. Every failure raises _MergeFailureError
     carrying the original GraphQL refusal, so the caller's readback can still
     adjudicate, except a post-merge head mismatch, which no readback may recover.
+    A failure raised after the gate carries the pins, so the readback recovery
+    runs the same post-merge head check before it reports the merge as success.
     """
+    stack = 0
+    pins: dict[int, str] | None = None
     try:
         stack = _stack_number(ctx.pr, ctx.repo_flag)
         pins = _assert_stack_ready(ctx, stack)
@@ -990,6 +1007,8 @@ def _merge_stack_async(
             f"complete it: {failure.message}\nGraphQL said: {graphql_output}",
             failure.code,
             failure.error_type,
+            stack=stack,
+            pins=pins,
         ) from failure
     _assert_heads_landed_as_gated(ctx, stack, pins)
 
@@ -1275,15 +1294,33 @@ def _finalize_after_success(ctx: _MergeContext) -> int:
     )
 
 
+def _verify_recovered_pins(ctx: _MergeContext, failure: _MergeFailureError) -> _MergeFailureError:
+    """Run the post-merge head check a failed stack wait skipped.
+
+    Returns the failure unchanged when every gated head still matches its pin,
+    or a landed failure when a head differs or the listing cannot be read.
+    """
+    if failure.pins is None:
+        return failure
+    try:
+        _assert_heads_landed_as_gated(ctx, failure.stack, failure.pins)
+    except _MergeFailureError as landed:
+        return landed
+    return failure
+
+
 def _recover_or_fail(ctx: _MergeContext, failure: _MergeFailureError) -> int:
     """After a failed merge command, let the readback decide.
 
     MERGED means the command failed after the merge landed (or a retry raced
     it): report success with recovered=true and keep the original error in the
-    audit record. Anything else, including a failed readback, reports the
-    original failure.
+    audit record. A stack merge first re-checks the gated downstack heads, since
+    the wait that failed never ran that check. Anything else, including a failed
+    readback, reports the original failure.
     """
     readback = _read_back(ctx.pr, ctx.repo_flag)
+    if readback is not None and readback.get("state") == "MERGED" and not failure.landed:
+        failure = _verify_recovered_pins(ctx, failure)
     if failure.landed:
         _emit_error(
             failure.message,
