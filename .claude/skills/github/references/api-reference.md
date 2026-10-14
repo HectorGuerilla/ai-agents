@@ -11,7 +11,6 @@ Reference documentation for the GitHub skill. For usage, see `../SKILL.md`.
 | 2 | Resource not found | PR/issue/milestone doesn't exist |
 | 3 | GitHub API error | Check error message, may be rate limit |
 | 4 | gh CLI not authenticated | Run `gh auth login` |
-| 5 | Idempotency skip | Comment already exists (expected) |
 | 100 | Not mergeable (`merge_pr.py`, script-specific) | PR has conflicts or checks failing |
 
 ## API Endpoints Used
@@ -101,9 +100,9 @@ Run from within a git repository, or provide `-Owner` and `-Repo` explicitly.
 
 Run `gh auth login` and authenticate with GitHub.
 
-### Exit code 5
+### Comment with `-Marker` already exists
 
-Expected when using `-Marker` and comment already exists. This is idempotency working correctly.
+The script skips the post and exits 0. This is idempotency working correctly.
 
 ### "Milestone not found"
 
