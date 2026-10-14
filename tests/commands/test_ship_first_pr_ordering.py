@@ -109,6 +109,16 @@ def host_bullets(item_text: str) -> list[str]:
     return [b for b in bullets if "host=" in b]
 
 
+def github_bullets(item_text: str) -> list[str]:
+    """Return the `host=github` bullets of a pre-flight item."""
+    return [b for b in host_bullets(item_text) if "`host=github`" in b]
+
+
+def ado_bullets(item_text: str) -> list[str]:
+    """Return the `host=ado` bullets of a pre-flight item."""
+    return [b for b in host_bullets(item_text) if "`host=ado`" in b]
+
+
 def invokes_pipeline_validator(text: str) -> bool:
     """True when ``text`` invokes the skill, not merely when it names the file."""
     return _INVOKE_VALIDATOR_RE.search(text) is not None
@@ -179,12 +189,12 @@ class TestPipelineHealthBranchesOnPrExistence:
 
     def test_open_pr_still_validates_in_preflight(self, pipeline_item: str) -> None:
         """Inverse guard: the fix must not disarm the gate for branches that have a PR."""
-        with_pr = [b for b in host_bullets(pipeline_item) if "`pr=#<number>`" in b]
+        with_pr = [b for b in github_bullets(pipeline_item) if "`pr=#<number>`" in b]
         assert len(with_pr) == 1
         assert checks_github_ci(with_pr[0])
 
     def test_no_pr_bullet_defers_instead_of_invoking(self, pipeline_item: str) -> None:
-        without_pr = [b for b in host_bullets(pipeline_item) if "`pr=none`" in b]
+        without_pr = [b for b in github_bullets(pipeline_item) if "`pr=none`" in b]
         assert len(without_pr) == 1
         assert not invokes_pipeline_validator(without_pr[0])
         assert "DEFERRED" in without_pr[0]
@@ -192,19 +202,18 @@ class TestPipelineHealthBranchesOnPrExistence:
 
     def test_no_pr_bullet_names_the_missing_pr_as_the_reason(self, pipeline_item: str) -> None:
         """The deferral reason is the missing PR number the CI query needs (#4841)."""
-        without_pr = [b for b in host_bullets(pipeline_item) if "`pr=none`" in b]
+        without_pr = [b for b in github_bullets(pipeline_item) if "`pr=none`" in b]
         assert len(without_pr) == 1
         assert "get_pr_checks.py" in without_pr[0]
         assert "#4841" in without_pr[0]
 
     def test_ado_branch_still_evaluates_build_policies(self, pipeline_item: str) -> None:
-        """Sibling non-regression: the ADO branch never had the deadlock and is untouched."""
-        ado = [b for b in host_bullets(pipeline_item) if "`host=ado`" in b]
-        assert len(ado) == 1
-        assert "pipeline-validator does not apply" in ado[0]
-        assert not invokes_pipeline_validator(ado[0])
+        """Sibling non-regression: ADO still evaluates PR build policies, not the validator."""
+        ado = ado_bullets(pipeline_item)
+        assert len(ado) == 2
+        assert all("pipeline-validator does not apply" in b for b in ado)
+        assert not any(invokes_pipeline_validator(b) for b in ado)
         assert "az repos pr policy list" in pipeline_item
-        assert "az pipelines build list" in pipeline_item
 
 
 class TestGithubNeverRoutesToAdoValidator:
@@ -276,7 +285,7 @@ class TestCheckStatusWaitTimeout:
     """`get_pr_checks.py --wait` exits 7 while checks are still pending; that is not FAIL."""
 
     def test_open_pr_bullet_reruns_on_exit_7(self, pipeline_item: str) -> None:
-        with_pr = [b for b in host_bullets(pipeline_item) if "`pr=#<number>`" in b]
+        with_pr = [b for b in github_bullets(pipeline_item) if "`pr=#<number>`" in b]
         assert len(with_pr) == 1
         assert "exit code 7" in with_pr[0].lower()
         assert "re-run the same command" in with_pr[0]
@@ -336,6 +345,14 @@ class TestPrDetectionDistinguishesErrors:
         assert "no PR exists" in detection.lower() or "no pull requests" in detection.lower()
         # Must require stopping on non-no-PR failures
         assert "stop" in detection.lower() or "error" in detection.lower()
+
+    def test_ado_detection_distinguishes_no_pr_from_query_failure(self, ship_text: str) -> None:
+        """Issue #6576: a failed `az repos pr list` must not set `pr=none`."""
+        detection = section(ship_text, "Mode Detection")
+        ado = [ln for ln in detection.splitlines() if ln.lstrip().startswith("- `host=ado`")]
+        assert len(ado) == 1
+        assert "non-zero exit" in ado[0]
+        assert "stop with an error" in ado[0]
 
 
 class TestShipReportStatesTheDeferral:
