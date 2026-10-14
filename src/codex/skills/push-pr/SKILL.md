@@ -52,6 +52,8 @@ Based on the above changes:
    python3 -I "${COPILOT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-.claude}}/skills/github/scripts/pr/new_pr.py" --prepare-body-file
    ```
 
+   - On Windows the allocator refuses to run. Follow the
+     Windows PR Body Fallback section below for steps 3, 4, 5, and 7.
    - Copy the returned path exactly. Do not store it in a shell variable because
      each tool call runs in a fresh shell.
    - The file starts with the line `<!-- replace with PR body -->`, followed by the
@@ -126,6 +128,52 @@ Based on the above changes:
   - `Resolves #789`: auto-resolves issue when PR merges
 - Ensure PR template sections are completed
 
+## Windows PR Body Fallback
+
+Use this only on Windows, and only when step 3 exits 2 with
+`ERROR: secure PR body files are not supported on Windows`. Every other
+platform keeps the allocator mandatory. The allocator needs directory file
+descriptors and owner-only modes that Windows does not provide.
+
+`new_pr.py` accepts `--body '<text>'` in place of `--body-file`. That path
+never calls the allocator or its file reader. The helper still runs the same
+title, dash, and escaped newline checks, then hands the body to `gh` on
+stdin, never as a command-line argument to `gh`.
+
+1. Skip `--prepare-body-file`. Fill the PR template from step 2 into the body
+   text yourself, with the same rules as step 3.
+2. Step 4 preflight: pass `--body '<body text>'` instead of `--body-file`. It
+   checks the title only, since there is no file to check.
+3. Step 5: `pr_description.py --body-file` reads any readable file. Run
+   `mkdir -p .project-toolkit/scratch` first, because the allocator refused
+   before it created that directory. Create `pr-body-windows.md` in it with
+   Write and expect one permission prompt. Later Edit fixes after a step 5
+   exit 1 stay inside the scoped `Edit` grant.
+4. Step 7: run the same command with the body text inline:
+
+   ```bash
+   python3 -I "${COPILOT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-.claude}}/skills/github/scripts/pr/new_pr.py" --title "<conventional commit title>" --body '<body text>'
+   ```
+
+   - Paste the file's final contents, unchanged, as the `--body` text. Step 5
+     checked the file, so every edit made there must reach this command.
+   - Quote the body so the shell passes it literally. In bash or Git Bash,
+     use single quotes and write each apostrophe as `'\''`. In PowerShell,
+     use a single-quoted here-string (`@'` ... `'@`). Never use double quotes:
+     bash runs each backtick code span as a command and expands `$name`, and
+     PowerShell treats the backtick as an escape and also expands `$`.
+   - Write the body literally in the command. Do not build it from a shell
+     variable, for the same fresh-shell reason as step 3.
+   - Use real line breaks inside the quoted text, never `\n`. If the escaped
+     newline check fails, its message says to pass `--body-file`. That is the
+     refused path on Windows, so fix the line breaks instead.
+   - Windows caps a command line near 8191 characters in cmd.exe and 32767
+     through CreateProcess. The body rides on argv twice: to `new_pr.py`, then
+     to `validate_pr_description.py`. If the command fails for length, trim
+     the body and keep every required template section.
+   - Do not add `--skip-validation`. The fallback changes how the body arrives,
+     not which checks it must pass.
+
 You have the capability to call multiple tools in a single response. You MUST do all of the above in a single message. Do not use any other tools or do anything else. Do not send any other text or messages besides these tool calls.
 
 ## Verification
@@ -133,7 +181,7 @@ You have the capability to call multiple tools in a single response. You MUST do
 - [ ] Branch created off main when the working branch was main, never a push to main
 - [ ] Title follows conventional commit format
 - [ ] Local `pr_description.py --body-file` run exited 0 before the push, or its absence stated
-- [ ] Body written into the allocator's returned path, copied exactly, never through a shell variable
+- [ ] Body written into the allocator's returned path, copied exactly, never through a shell variable (Windows: the `--body` fallback, with step 5 still run)
 - [ ] Every template section adapted from the real diff, with no placeholder comment left in
 - [ ] An `## Acceptance criteria` heading present with `- [ ]` bullets, checked only where met
 - [ ] Issue-linking keyword present, and a closing keyword used only when the diff delivers what the issue asks
