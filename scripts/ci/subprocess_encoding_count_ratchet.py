@@ -63,6 +63,7 @@ _SKILL_MIRROR_ROOTS: tuple[str, ...] = (
     "src/claude/skills",
     "src/copilot-cli/skills",
     "src/codex/skills",
+    "src/cursor/skills",
 )
 _SKILL_CANONICAL_ROOT = ".claude/skills"
 

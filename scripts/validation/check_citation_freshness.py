@@ -121,6 +121,11 @@ _GENERATED_SKILL_MIRROR_ROOTS = (
     "src/codex/skills/",
     # Lib packages render from scripts/ with an import rewrite (lib_mirror.py).
     "src/codex/lib/",
+    "src/cursor/skills/",
+    # ADR-115: the Cursor tree also renders rules (.mdc) and lib/ from canonical
+    # sources, so a citation there is policed once at the source.
+    "src/cursor/rules/",
+    "src/cursor/lib/",
 )
 
 

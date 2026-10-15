@@ -120,6 +120,7 @@ ALLOWED_REPO_ROOT_ENTRIES = frozenset(
         ".codeql",
         ".coderabbit.yaml",
         ".config",
+        ".cursor-plugin",
         ".env.example",
         ".factory",
         ".gemini",
@@ -815,6 +816,14 @@ _GENERATED_MIRRORS: tuple[tuple[str, str, tuple[str, str] | None], ...] = (
     # src/copilot-cli/skills/ row above, no _COPILOT_SKILL_EXCLUDES-style
     # filter applies here: merge-resolver ships in the Claude plugin tree.
     ("src/claude/skills/", ".claude/skills/", None),
+    # ADR-115 Decision 1: the Cursor plugin tree copies the same canonical
+    # files. Skills and lib/ copy support files byte for byte (SKILL.md keeps
+    # fewer frontmatter keys, so it is never a verbatim mirror and stays
+    # flagged); rules render as .mdc and agents keep two frontmatter keys.
+    ("src/cursor/skills/", ".claude/skills/", None),
+    ("src/cursor/lib/", ".claude/lib/", None),
+    ("src/cursor/rules/", ".claude/rules/", (".mdc", ".md")),
+    ("src/cursor/agents/", ".claude/agents/", None),
     # ADR-115 Decision 7: the Codex plugin tree copies the same skill files and
     # lib packages. SKILL.md differs by the dropped model keys, which carry no
     # suppression comment; every script is a byte copy, so

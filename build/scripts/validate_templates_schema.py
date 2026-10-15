@@ -22,6 +22,18 @@ import sys
 from pathlib import Path, PurePosixPath
 
 from hermes_pack_config import HermesPackError, parse_stanza
+from schema_tree_keys import (
+    validate_agents_tree_copy as _validate_agents_tree_copy,
+)
+from schema_tree_keys import (
+    validate_frontmatter_keep as _validate_frontmatter_keep,
+)
+from schema_tree_keys import (
+    validate_rules_output_format as _validate_rules_output_format,
+)
+from schema_tree_keys import (
+    validate_string_list as _validate_string_list,
+)
 from yaml_loader import (
     ConfigError,
     load_platform_config,
@@ -53,6 +65,8 @@ AGENTS_KEYS = {
     "sourceSuffix",
     "outputSuffix",
     "excludeFilenames",
+    "frontmatterKeep",
+    "deriveReadonly",
 }
 SKILLS_KEYS = {
     "sourceDir",
@@ -60,6 +74,7 @@ SKILLS_KEYS = {
     "mode",
     "excludeFilenames",
     "frontmatterDrop",
+    "frontmatterKeep",
     # ADR-115 Decision 6: the `hermes-packs` mode.
     "packMaxFiles",
     "hermesCommit",
@@ -92,6 +107,7 @@ RULES_KEYS = {
     "frontmatterRemap",
     "frontmatterDrop",
     "keepInternalGlobsFor",
+    "outputFormat",
 }
 HOOKS_KEYS = {
     "settingsSource",
@@ -248,17 +264,9 @@ def _validate_command_resources(name: str, stanza: dict[str, object]) -> list[st
     return errors
 
 
-def _validate_string_list(name: str, stanza: dict[str, object], key: str) -> list[str]:
-    if key not in stanza:
-        return []
-    value = stanza[key]
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        return [f"`artifacts.{name}.{key}`: must be a list of strings"]
-    return []
-
-
 def _validate_exclude_filenames(name: str, stanza: dict[str, object]) -> list[str]:
-    return _validate_string_list(name, stanza, "excludeFilenames")
+    errors: list[str] = _validate_string_list(name, stanza, "excludeFilenames")
+    return errors
 
 
 def _validate_skills_mode(stanza: dict[str, object]) -> list[str]:
@@ -299,8 +307,12 @@ def _validate_artifact_stanza(name: str, stanza: object) -> list[str]:
     if name == "skills":
         # ADR-111: an explicit null would silently disable the projection.
         errors.extend(_validate_string_list(name, stanza, "frontmatterDrop"))
+        errors.extend(_validate_frontmatter_keep(name, stanza))
         errors.extend(_validate_skills_mode(stanza))
+    if name == "agents":
+        errors.extend(_validate_agents_tree_copy(name, stanza))
     if name == "rules":
+        errors.extend(_validate_rules_output_format(name, stanza))
         errors.extend(_validate_rules_output_dirs(name, stanza))
         errors.extend(_validate_rules_keep_internal_globs(name, stanza))
     if name == "commands":

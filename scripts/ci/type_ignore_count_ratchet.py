@@ -102,6 +102,7 @@ _LIB_MIRROR_ROOTS: tuple[str, ...] = (
     "src/claude/lib",
     "src/copilot-cli/lib",
     "src/codex/lib",
+    "src/cursor/lib",
 )
 _LIB_MIRROR_PACKAGES: tuple[str, ...] = LIB_MIRROR_PACKAGES
 _LIB_MIRROR_PREFIXES: tuple[str, ...] = tuple(
@@ -128,6 +129,7 @@ _SKILL_MIRROR_ROOTS: tuple[str, ...] = (
     "src/claude/skills",
     "src/copilot-cli/skills",
     "src/codex/skills",
+    "src/cursor/skills",
 )
 _SKILL_CANONICAL_ROOT = ".claude/skills"
 
