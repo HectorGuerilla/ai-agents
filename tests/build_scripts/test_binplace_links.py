@@ -9,6 +9,7 @@ from the plugin entry.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -321,3 +322,38 @@ def test_live_manifest_links_codex_skills_into_agents() -> None:
 
     assert rows["skills-codex"].link is True
     assert rows["skills-codex"].install_tree == _REPO_ROOT / ".agents" / "skills"
+
+
+def test_github_agents_link_to_shipped_copilot_agents_without_a_model_pin() -> None:
+    # ADR-119: .github/agents/*.agent.md link to src/copilot-cli/agents, and
+    # that tree is inherit-only (PR #5040; issue #4938: a bad value silently
+    # falls back), so no
+    # shipped Copilot agent may carry one.
+    shipped = sorted((_REPO_ROOT / "src" / "copilot-cli" / "agents").glob("*.agent.md"))
+    assert shipped
+    for agent in shipped:
+        link = _REPO_ROOT / ".github" / "agents" / agent.name
+        assert os.readlink(link) == f"../../src/copilot-cli/agents/{agent.name}", agent.name
+        frontmatter = agent.read_text(encoding="utf-8").split("---", 2)[1]
+        assert not any(line.startswith("model:") for line in frontmatter.splitlines()), agent.name
+
+
+def test_every_github_agent_file_is_a_link_and_only_known_entries_are_real() -> None:
+    github_agents = _REPO_ROOT / ".github" / "agents"
+    real = sorted(entry.name for entry in github_agents.iterdir() if not entry.is_symlink())
+
+    assert real == ["pr-comment-responder.prompt.md", "security"]
+    for entry in github_agents.glob("*.agent.md"):
+        assert os.readlink(entry) == f"../../src/copilot-cli/agents/{entry.name}", entry.name
+
+
+def test_github_hooks_json_links_to_the_shipped_file_and_registers_nothing() -> None:
+    hooks = _REPO_ROOT / ".github" / "hooks"
+
+    assert os.readlink(hooks / "hooks.json") == "../../src/copilot-cli/hooks/hooks.json"
+    assert not (hooks / "memory-recall.json").is_symlink()
+    shipped = json.loads((_REPO_ROOT / "src/copilot-cli/hooks/hooks.json").read_text("utf-8"))
+    assert shipped["hooks"] == {}, (
+        "ADR-119 decision 11: Copilot loading a linked .github/hooks/hooks.json is "
+        "unverified; record a link-loading probe before registering a hook"
+    )

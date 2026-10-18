@@ -29,6 +29,14 @@ rows:
     install_tree: .claude/skills
     compile: skill_templates
     link: true
+  - class: agents-github
+    # ADR-119: .github/agents/<name>.agent.md links to the shipped Copilot
+    # render, so the repository's own Copilot agents are the shipped ones.
+    # pr-comment-responder.prompt.md and security/ stay hand-maintained.
+    source: templates/agents
+    plugin_tree: src/copilot-cli/agents
+    install_tree: .github/agents
+    link: true
   - class: skills-codex
     # ADR-119: Codex loads repository skills from .agents/skills. Each
     # shipped Codex skill links to its rendered directory, so Codex in this
@@ -60,6 +68,9 @@ rows:
     source: templates/hooks
     plugin_tree: src/copilot-cli/hooks
     install_tree: .github/hooks
+    # ADR-119: .github/hooks/hooks.json links to the shipped Copilot file;
+    # the hand-authored memory-recall.json stays a real file.
+    link: true
   - class: hooks-json
     # hooks.json renders to src/claude/hooks.json (plugin root, ADR-109
     # section 2: "agents/, skills/, rules/, hooks/ plus hooks.json"), not

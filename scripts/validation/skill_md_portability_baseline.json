@@ -110,7 +110,7 @@
     "templates/agents/task-decomposer.shared.md": 2
   },
   "marker_files": {
-    ".claude/skills/ai-agents-architecture-contract/SKILL.md": 38,
+    ".claude/skills/ai-agents-architecture-contract/SKILL.md": 37,
     ".claude/skills/ai-agents-architecture-contract/references/provenance.md": 22,
     ".claude/skills/ai-agents-architecture-contract/references/weak-points.md": 4,
     ".claude/skills/ai-agents-build-and-env/SKILL.md": 15,

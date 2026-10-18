@@ -1207,12 +1207,10 @@ def _is_platform_config(path: Path) -> bool:
 OWNED_PREFIXES: tuple[str, ...] = (
     "src/",
     ".github/instructions/",
-    ".github/agents/",
     ".claude/rules/",
     ".claude/lib/",
     ".claude/hooks/",
     ".claude/settings.json",
-    ".github/hooks/",
     "docs/agent-catalog.md",
     ".project-toolkit/architecture/README.md",
 )

@@ -4973,12 +4973,12 @@ def test_binplace_rejects_install_tree_outside_repo(tmp_path: Path) -> None:
 # OWNED_PREFIXES verification ------------------------------------------------
 
 
-def test_owned_prefixes_holds_github_agents_but_not_claude_agents() -> None:
-    """ADR-119: .claude/agents/ holds symlinks, which the --check snapshot refuses.
+def test_owned_prefixes_hold_neither_linked_agent_tree() -> None:
+    """ADR-119: .claude/agents/ and .github/agents/ hold symlinks, which --check refuses.
 
-    The plugin tree under ``src/`` is the owned, drift-checked copy of every
-    agent; the ``.claude/agents/`` links are checked by binplace's link row.
+    The plugin trees under ``src/`` are the owned, drift-checked copies of every
+    agent; the install links are checked by binplace's link rows.
     """
-    assert ".github/agents/" in build_all.OWNED_PREFIXES
+    assert ".github/agents/" not in build_all.OWNED_PREFIXES
     assert ".claude/agents/" not in build_all.OWNED_PREFIXES
     assert "src/" in build_all.OWNED_PREFIXES

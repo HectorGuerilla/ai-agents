@@ -15,7 +15,7 @@ Per-class render map. Compilers run inside `build_all.py` except `prompts`; binp
 | settings | `hooks/settings.tmpl` | `hook_templates.py` | none -> `.claude/settings.json` |
 | prompts | `.claude/skills/review/references` | `generate_pr_quality_prompts.py` | none -> `.github/prompts/` |
 
-- `generate_agents.py` renders `src/copilot-cli/agents/`, `src/vs-code-agents/`, and via `platforms/github.yaml` `.github/agents/` (no `model:`; GitHub rejects it, issue #4938).
+- `generate_agents.py` renders `src/copilot-cli/agents/`, `src/vs-code-agents/`; `.github/agents/*.agent.md` link to the former (inherit-only, no `model:`).
 - `generate_rules.py` mirrors `src/claude/rules/` to `.github/instructions/` and `src/copilot-cli/instructions/`.
 - `generate_hooks.py` with `generate_dispatcher.py` reads `src/claude/hooks/` and `hooks.json`, writes `src/copilot-cli/hooks/`, binplaced to `.github/hooks/`.
 - `agents/<stem>.shared.md` feeds `src/vs-code-agents/` and `docs/agent-catalog.md`; it is also `generate_agents.py`'s stem list: no `.shared.md`, no copilot-cli, vs-code or github file for that stem.
@@ -30,7 +30,7 @@ Per-class render map. Compilers run inside `build_all.py` except `prompts`; binp
 
 | Path | Why |
 |---|---|
-| `platforms/*.yaml` | Per-platform output config; only `github.yaml` lacks `model_tiers` |
+| `platforms/*.yaml` | Per-platform output config |
 | `platforms/binplace.yaml` | Binplace manifest; feeds the `.claude/` write allowlist |
 | `README.md` | Predates ADR-109; names retired hand-edit paths |
 
