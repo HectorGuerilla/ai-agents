@@ -162,6 +162,7 @@ def _validate_scenarios_measure(data: Mapping[str, Any], path: Path) -> None:
 
 
 _SHIPPED_SKILLS_DIR = Path("src") / "claude" / "skills"
+_SHIPPED_RULES_DIR = Path("src") / "claude" / "rules"
 
 
 def _resolve_target(repo_root: Path, target_str: str, artifact_dir: Path, kind: str) -> str:
@@ -175,6 +176,9 @@ def _resolve_target(repo_root: Path, target_str: str, artifact_dir: Path, kind: 
     if kind == "skill":
         # ADR-119: a shipped .claude/skills/<name> links into the plugin tree.
         allowed_roots.append((repo_root / _SHIPPED_SKILLS_DIR).resolve())
+    else:
+        # ADR-119: a shipped .claude/rules/<name>.md links into the plugin tree.
+        allowed_roots.append((repo_root / _SHIPPED_RULES_DIR).resolve())
     if not any(resolved.is_relative_to(root) for root in allowed_roots):
         raise CoverageConfigError(f"{kind}_path must stay under {artifact_dir}: {target_str}")
     if kind == "rule":

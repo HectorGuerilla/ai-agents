@@ -440,3 +440,30 @@ def test_linked_skill_escaping_both_roots_is_refused(tmp_path: Path) -> None:
         gate._resolve_target(
             tmp_path, ".claude/skills/alpha/SKILL.md", Path(".claude/skills"), "skill"
         )
+
+
+@pytest.mark.skipif(__import__("sys").platform == "win32", reason="symlinks need Developer Mode")
+def test_linked_rule_resolves_into_the_plugin_tree(tmp_path: Path) -> None:
+    # ADR-119: a shipped .claude/rules/<name>.md links to src/claude/rules/<name>.md.
+    plugin = tmp_path / "src" / "claude" / "rules"
+    plugin.mkdir(parents=True)
+    (plugin / "alpha.md").write_text("# alpha\n", encoding="utf-8")
+    (tmp_path / ".claude" / "rules").mkdir(parents=True)
+    (tmp_path / ".claude" / "rules" / "alpha.md").symlink_to("../../src/claude/rules/alpha.md")
+
+    artifact = gate._resolve_target(
+        tmp_path, ".claude/rules/alpha.md", Path(".claude/rules"), "rule"
+    )
+
+    assert artifact == "alpha"
+
+
+@pytest.mark.skipif(__import__("sys").platform == "win32", reason="symlinks need Developer Mode")
+def test_linked_rule_escaping_both_roots_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "alpha.md").write_text("x", encoding="utf-8")
+    (tmp_path / ".claude" / "rules").mkdir(parents=True)
+    (tmp_path / ".claude" / "rules" / "alpha.md").symlink_to("../../elsewhere/alpha.md")
+
+    with pytest.raises(gate.CoverageConfigError, match="must stay under"):
+        gate._resolve_target(tmp_path, ".claude/rules/alpha.md", Path(".claude/rules"), "rule")
