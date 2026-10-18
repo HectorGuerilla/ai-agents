@@ -1764,14 +1764,54 @@ def _import_roots(script: Path, toplevel: Path) -> list[Path]:
     work tree itself (top-level packages such as ``scripts.utils``).
     """
     roots = [script.parent]
+    # ADR-119: a script reached through a pinned link runs with ``__file__``
+    # spelled through the link, and the verifiers put
+    # ``abspath(dirname(__file__)/../../../../lib)`` first on ``sys.path``.
+    # ``abspath`` does not resolve links, so that is the ``lib`` beside the
+    # link (``.claude/lib``), a separate file from the one beside the target.
+    # Those roots come first, as they do at run time.
+    for alias in _pinned_aliases(script, toplevel):
+        roots.extend(_ancestor_libs(alias, toplevel))
+    roots.extend(lib for lib in _ancestor_libs(script, toplevel) if lib not in roots)
+    roots.append(toplevel)
+    return roots
+
+
+def _ancestor_libs(script: Path, toplevel: Path) -> list[Path]:
+    """Every ``lib`` directory in an ancestor of ``script`` at or below ``toplevel``."""
+    libs: list[Path] = []
     for ancestor in script.parents:
         if not _is_within(ancestor, toplevel):
             continue
         lib = ancestor / "lib"
         if lib.is_dir():
-            roots.append(lib)
-    roots.append(toplevel)
-    return roots
+            libs.append(lib)
+    return libs
+
+
+def _pinned_aliases(script: Path, toplevel: Path) -> list[Path]:
+    """The paths that spell ``script`` through a pinned link, lexically.
+
+    For each link the trusted ref pins and the work tree still holds, a
+    script under the link's resolved target is also reachable as
+    ``<link>/<rest>``. Returns those spellings without resolving them.
+    """
+    pinned = _pinned_links()
+    if pinned is None:
+        return []
+    git_top, table = pinned
+    resolved_script = script.resolve()
+    aliases: list[Path] = []
+    for rel in table:
+        link = git_top / rel
+        if not _is_within(link, toplevel) or _pinned_link_text(link, toplevel) is None:
+            continue
+        target = Path(os.path.normpath(link.parent / table[rel])).resolve()
+        if resolved_script != target and not resolved_script.is_relative_to(target):
+            continue
+        alias = link / resolved_script.relative_to(target) if resolved_script != target else link
+        aliases.append(Path(os.path.normpath(alias)))
+    return aliases
 
 
 def _imported_module_names(source: bytes) -> list[tuple[int, str]]:

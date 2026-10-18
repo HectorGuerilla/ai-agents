@@ -5088,6 +5088,64 @@ class TestPinnedLinkTrust:
         payload = json.loads(capsys.readouterr().out)
         assert "real/verify.py" in payload["command_trust"]["checked_files"]
 
+    @staticmethod
+    def _aliased_lib_layout(tmp_path, marker):
+        """``a/linked -> ../b/real``; the verifier imports from the lib beside the link.
+
+        Mirrors ``.claude/skills/<name> -> ../../src/claude/skills/<name>``:
+        ``abspath(dirname(__file__)/../lib)`` keeps the link spelling, so the
+        module that runs is ``a/lib/mod.py``, not ``b/lib/mod.py``.
+        """
+        for lib in ("a/lib", "b/lib"):
+            (tmp_path / lib).mkdir(parents=True)
+            (tmp_path / lib / "mod.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (tmp_path / "b" / "real").mkdir()
+        script = tmp_path / "b" / "real" / "verify.py"
+        script.write_text(
+            "import json, os, pathlib, sys\n"
+            "sys.path.insert(0, os.path.abspath("
+            "os.path.join(os.path.dirname(__file__), '..', 'lib')))\n"
+            "import mod\n"
+            f"pathlib.Path({str(marker)!r}).write_text('ran')\n"
+            "print(json.dumps({'ok': True}))\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "a" / "linked").symlink_to("../b/real", target_is_directory=True)
+        return [tmp_path / "a" / "lib" / "mod.py", tmp_path / "b" / "lib" / "mod.py", script]
+
+    def test_lib_beside_a_pinned_link_joins_the_import_closure(self, git_repo, tmp_path, capsys):
+        marker = tmp_path / "ran.txt"
+        files = self._aliased_lib_layout(tmp_path, marker)
+        config_path = _write_config(
+            tmp_path, [_script_criterion("Aliased", tmp_path / "a" / "linked" / "verify.py")]
+        )
+        _commit_as_trusted(git_repo, config_path, *files, tmp_path / "a" / "linked")
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1", "--json"])
+
+        assert rc == 0
+        assert marker.exists()
+        assert (
+            "a/lib/mod.py" in json.loads(capsys.readouterr().out)["command_trust"]["checked_files"]
+        )
+
+    def test_pr_edit_to_the_lib_beside_a_pinned_link_halts(self, git_repo, tmp_path):
+        # The PR rewrites only the module the verifier really imports; the
+        # copy beside the link target stays byte-identical to the trusted ref.
+        marker = tmp_path / "ran.txt"
+        files = self._aliased_lib_layout(tmp_path, marker)
+        config_path = _write_config(
+            tmp_path, [_script_criterion("Aliased", tmp_path / "a" / "linked" / "verify.py")]
+        )
+        _commit_as_trusted(git_repo, config_path, *files, tmp_path / "a" / "linked")
+        (tmp_path / "a" / "lib" / "mod.py").write_text("VALUE = 2\n", encoding="utf-8")
+        _git(git_repo, "commit", "-q", "-am", "PR edits the aliased lib")
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1"])
+
+        assert rc == 2
+        assert not marker.exists(), "an edited module the verifier imports must not run"
+
     def test_link_the_pr_adds_halts(self, git_repo, tmp_path):
         marker = tmp_path / "ran.txt"
         (tmp_path / "real").mkdir()
