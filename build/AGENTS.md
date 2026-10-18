@@ -4,7 +4,7 @@ Generators and drift gates for the agent/skill/rule/hook/settings pipeline. Sour
 
 ## Matters
 
-- `build_all.py --check`: drift gate over `_effective_owned_prefixes` (`OWNED_PREFIXES` plus each repo-local `.claude/skills/<name>/SKILL.md`) and binplace links.
+- `build_all.py --check`: drift gate over `_effective_owned_prefixes` (`OWNED_PREFIXES` plus each repo-local `SKILL.md`, repo-only rule, and real `.github/instructions/` file) and binplace links.
 - Per-class render map (agents, rules, skills, hooks, settings, prompts): `templates/AGENTS.md`.
 - REQ-003-010: generators write `.claude/` only via `binplace_manifest.claude_allowlist()`: agent and skill links, rules, repo-local `SKILL.md`, `hooks/` plus `hooks.json`, `settings.json`, `lib/<pkg>/`, `lib/bootstrap.py`; `NO-REGEN` paths (`regen_guard.py`) excluded.
 - `validate_install_parity.py` reports no violation ever; `validate-generated-agents.yml` still runs it (exit 2 on base-ref alone); `check_agent_content_parity.py` is the live byte gate.
@@ -25,12 +25,12 @@ Generators and drift gates for the agent/skill/rule/hook/settings pipeline. Sour
 
 ## Skip
 
-- Generator OUTPUT (`OWNED_PREFIXES`): `src/`, `.github/instructions/`, `.claude/rules/`, `.claude/lib/`, `.claude/hooks/`, `.claude/settings.json`, `docs/agent-catalog.md`, `.project-toolkit/architecture/README.md`. Hand-maintained inside `src/`: `*.md`, `claude/AGENTS.md`, `claude/claude-instructions.template.md`, `claude/security/references/`, `copilot-cli/THIRD-PARTY-NOTICES.TXT`, `copilot-cli/docs/`, both `plugin.json`.
+- Generator OUTPUT (`OWNED_PREFIXES`): `src/`, `.claude/lib/`, `.claude/hooks/`, `.claude/settings.json`, `docs/agent-catalog.md`, `.project-toolkit/architecture/README.md`. Hand-maintained inside `src/`: `*.md`, `claude/AGENTS.md`, `claude/claude-instructions.template.md`, `claude/security/references/`, `copilot-cli/THIRD-PARTY-NOTICES.TXT`, `copilot-cli/docs/`, both `plugin.json`.
 
 ## Constraints
 
 - Order: agents, agent-catalog, adr-index, skills, rules, lib, hooks, then binplace (`GENERATORS`); `lib` before `hooks`.
-- Binplace follows every generator, copying each plugin tree onto its install tree (`.github/hooks/` from `src/copilot-cli/hooks/`, except the hand-authored `.github/hooks/memory-recall.json`, which binplace leaves alone); `link: true` rows place symlinks instead (`binplace_links.py`, ADR-119), so linked trees are not owned. Sole writer of `.claude/agents/`, `.claude/skills/<name>` links, `.claude/rules/`, `.claude/hooks/`, `.claude/lib/<pkg>/`, `.claude/lib/bootstrap.py`, `.github/agents/`, and `.github/hooks/` links. `.claude/settings.json` renders from `templates/hooks/settings.tmpl`, no plugin hop.
+- Binplace follows every generator, copying each plugin tree onto its install tree (`.github/hooks/` from `src/copilot-cli/hooks/`, except the hand-authored `.github/hooks/memory-recall.json`, which binplace leaves alone); `link: true` rows place symlinks instead (`binplace_links.py`, ADR-119), so linked trees are not owned. Sole writer of `.claude/agents/`, `.claude/skills/<name>` and shipped `.claude/rules/` links, `.claude/hooks/`, `.claude/lib/<pkg>/`, `.claude/lib/bootstrap.py`, `.github/agents/`, and `.github/hooks/` links. `.claude/settings.json` renders from `templates/hooks/settings.tmpl`, no plugin hop.
 - Mirrors read `src/claude/` rules, hooks, skills; lib renders from `scripts/` into both plugin trees; skill support files are hand-maintained in `src/claude/skills/<name>/` (ADR-119).
 - A literal `{{` in a rule template is written `\{{`.
 - pre_pr rows: `Orphaned Build Deferrals`, `Generated Artifact Staleness`, four `<class> Template Drift` rows (Skill, Agent, Rule, Hook), `Agent Catalog Drift`, `Agent Drift Detection`, `Agent Content Parity (.claude/agents vs src/claude)`.

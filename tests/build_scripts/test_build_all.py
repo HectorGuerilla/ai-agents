@@ -1747,9 +1747,9 @@ def test_run_check_restores_owned_prefix_after_generator_writes(
     (repo / ".claude" / "skills").mkdir(parents=True)
     _write_skill(repo / ".claude" / "skills", "alpha")
     _write_platform_with_skills(repo, provider="copilot-cli")
-    # Pre-commit a tracked file under .github/instructions/ that is committed
+    # Pre-commit a tracked file under src/copilot-cli/instructions/ that is committed
     # at content A, and arrange for the run to (hypothetically) write content B.
-    inst_dir = repo / ".github" / "instructions"
+    inst_dir = repo / "src" / "copilot-cli" / "instructions"
     inst_dir.mkdir(parents=True)
     tracked = inst_dir / "rule-x.md"
     tracked.write_text("committed A\n")
@@ -1761,7 +1761,9 @@ def test_run_check_restores_owned_prefix_after_generator_writes(
 
     def _overwriting_agent(repo_root, cfg, platform, **_kw):
         # Simulate what generate_rules does: write under owned prefix.
-        (repo_root / ".github" / "instructions" / "rule-x.md").write_text("regenerated B\n")
+        (repo_root / "src" / "copilot-cli" / "instructions" / "rule-x.md").write_text(
+            "regenerated B\n"
+        )
         return build_all.GeneratorResult(artifact="agents", platform="*", exit_code=0)
 
     monkeypatch.setattr(build_all, "_build_agents", _overwriting_agent)
@@ -1903,11 +1905,11 @@ def test_restore_preserves_preexisting_bytecode_under_owned_prefixes(
     the same race issue #3856 closes.
     """
     repo = tmp_path / "repo"
-    cache = repo / ".github" / "instructions" / "pkg" / "__pycache__"
+    cache = repo / "src" / "copilot-cli" / "instructions" / "pkg" / "__pycache__"
     cache.mkdir(parents=True)
     pyc = cache / "mod.cpython-314.pyc"
     pyc.write_bytes(b"PREEXISTING")
-    sibling = repo / ".github" / "instructions" / "rule-x.md"
+    sibling = repo / "src" / "copilot-cli" / "instructions" / "rule-x.md"
     sibling.write_text("committed A\n")
 
     snapshot = build_all._snapshot_owned_prefixes(repo, build_all.OWNED_PREFIXES)
@@ -1941,7 +1943,7 @@ def test_guard_snapshot_still_excludes_bytecode(tmp_path: Path) -> None:
 def test_restore_replaces_directory_conflicting_with_snapshot_file(tmp_path: Path) -> None:
     """#2440: restore handles file-to-directory conflicts."""
     repo = tmp_path / "repo"
-    tracked = repo / ".github" / "instructions" / "rule-x.md"
+    tracked = repo / "src" / "copilot-cli" / "instructions" / "rule-x.md"
     tracked.parent.mkdir(parents=True)
     tracked.write_text("committed A\n")
     snapshot = build_all._snapshot_owned_prefixes(repo, build_all.OWNED_PREFIXES)

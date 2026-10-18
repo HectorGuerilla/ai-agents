@@ -334,13 +334,33 @@ def _extra_findings(
     return findings
 
 
+def _binplaced_rels(manifest: Manifest, surface: Surface, files: Sequence[str]) -> set[str]:
+    return {
+        r
+        for r in _authority_rels(surface, files)
+        if owner_of(manifest, join(surface.path, r))[0] is surface
+    }
+
+
 def check_hand_maintained(
     repo_root: Path, manifest: Manifest, files: Sequence[str]
 ) -> list[Finding]:
-    """Byte-compare every hand-maintained copy against its authority."""
+    """Byte-compare every hand-maintained copy against its authority.
+
+    A binplaced surface is not compared (``build_all.py --check`` owns its
+    bytes) but its extras are refused, ``extras: allow`` aside.
+    """
     present = set(files)
     findings: list[Finding] = []
     for surface in manifest.surfaces:
+        if surface.relation == "binplaced" and surface.authority:
+            # Binplace owns freshness of its copies and links; this module
+            # only refuses a file under the surface that has no authority
+            # file, so a repo-only file needs its own declared surface.
+            findings.extend(
+                _extra_findings(manifest, surface, files, _binplaced_rels(manifest, surface, files))
+            )
+            continue
         if not surface.hand_maintained:
             continue
         rels = {

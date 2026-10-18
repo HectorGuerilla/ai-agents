@@ -93,12 +93,14 @@ from atomic_write import (  # noqa: E402
     reject_symlinked_ancestors,
 )
 from regen_guard import detect_reason  # noqa: E402
+from rule_distribution import repo_only_rule_names  # noqa: E402
 from skill_distribution import repo_local_names  # noqa: E402
 from yaml_loader import ConfigError, load_platform_config, validate_relative_path  # noqa: E402
 
 _MANIFEST_REL = Path("templates") / "platforms" / "binplace.yaml"
 _SKILLS_COMPILE_DELEGATE = "skill_templates"
 _CODEX_SKILLS_ROOT = ".agents/skills"
+_RULES_CLASS = "rules"
 
 
 class BinplaceConfigError(Exception):
@@ -340,11 +342,14 @@ def claude_allowlist(repo_root: Path) -> set[Path]:
             continue
         if row.link and row.plugin_tree is not None:
             allow |= binplace_links.install_link_paths(
-                row.plugin_tree, row.install_tree, _repo_local_skill_dirs(repo_root, row)
+                row.plugin_tree, row.install_tree, _repo_local_names(repo_root, row)
             )
         if row.compile == _SKILLS_COMPILE_DELEGATE:
             allow |= skill_templates.owned_targets(repo_root)
             continue
+        if row.class_name == _RULES_CLASS:
+            # ADR-119 decision 13: rule_templates writes repo-only rules here.
+            allow |= {row.install_tree / name for name in _repo_local_names(repo_root, row)}
         if row.link:
             continue
         if row.plugin_tree is None:
@@ -449,7 +454,7 @@ def binplace(repo_root: Path, *, check: bool) -> BinplaceResult:
                     row.plugin_tree,
                     row.install_tree,
                     check=check,
-                    skip_names=_repo_local_skill_dirs(repo_root, row),
+                    skip_names=_repo_local_names(repo_root, row),
                 ),
             )
             continue
@@ -458,7 +463,7 @@ def binplace(repo_root: Path, *, check: bool) -> BinplaceResult:
             row.install_tree,
             check=check,
             result=result,
-            skip_top_dirs=_repo_local_skill_dirs(repo_root, row),
+            skip_top_dirs=_repo_local_names(repo_root, row),
         )
     return result
 
@@ -472,18 +477,24 @@ def _fold_link_outcome(result: BinplaceResult, outcome: binplace_links.LinkOutco
     result.exit_code = max(result.exit_code, outcome.exit_code)
 
 
-def _repo_local_skill_dirs(repo_root: Path, row: Row) -> frozenset[str]:
-    """Return the ``skills`` row's ``distribution: repo-local`` skill directory names.
+def _repo_local_names(repo_root: Path, row: Row) -> frozenset[str]:
+    """Return the install-tree entry names a row must leave to the repository.
 
-    Binplace neither copies, drift-reports, nor lists as ``unowned`` anything
-    under a repo-local skill's directory: ``skill_templates.compile_all``
-    renders its ``SKILL.md`` straight to the install tree and its support
-    files are canonical there, so a leftover ``src/claude/skills/<name>/``
-    copy must never overwrite them. Every other row returns the empty set.
+    The ``skills`` row skips each ``distribution: repo-local`` skill
+    directory: ``skill_templates.compile_all`` renders its ``SKILL.md``
+    straight to the install tree and its support files are canonical there,
+    so a leftover ``src/claude/skills/<name>/`` copy must never overwrite
+    them. The ``rules`` row skips each repo-only rule file (ADR-119 decision
+    13, ``rule_distribution.is_repo_only``), which ``rule_templates`` renders
+    straight to ``.claude/rules/``. Binplace neither links, copies,
+    drift-reports, nor lists those entries as unowned. Every other row
+    returns the empty set.
     """
-    if row.compile != _SKILLS_COMPILE_DELEGATE:
-        return frozenset()
-    return frozenset(repo_local_names(repo_root))
+    if row.compile == _SKILLS_COMPILE_DELEGATE:
+        return frozenset(repo_local_names(repo_root))
+    if row.class_name == _RULES_CLASS:
+        return frozenset(f"{name}.md" for name in repo_only_rule_names(repo_root))
+    return frozenset()
 
 
 def _binplace_one_row(

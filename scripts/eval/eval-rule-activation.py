@@ -1989,6 +1989,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 RULES_DIR = (REPO_ROOT / ".claude" / "rules").resolve()
+# Shipped rules are symlinks from .claude/rules/<name>.md into src/claude/rules/
+# (ADR-119); repo-only rules stay real files under .claude/rules/.
+RULES_DIRS = (RULES_DIR, (REPO_ROOT / "src" / "claude" / "rules").resolve())
 SKILLS_DIR = (REPO_ROOT / ".claude" / "skills").resolve()
 # Shipped skills are symlinks from .claude/skills/<name> into src/claude/skills/
 # (ADR-119), so a resolved shipped skill lives under the second root.
@@ -2126,10 +2129,13 @@ def _validate_scenarios_shape(data: dict[str, Any], spath: Path) -> int | None:
 
 def _resolve_rule_path(rule_path_str: str) -> Path | int:
     """Resolve and validate rule_path stays under .claude/rules/ as a .md file."""
-    rule_path = (REPO_ROOT / rule_path_str).resolve()
-    try:
-        rule_path.relative_to(RULES_DIR)
-    except ValueError:
+    joined = REPO_ROOT / rule_path_str
+    rule_path = joined.resolve()
+    # Named under .claude/rules/, resolving there or (a shipped link) into
+    # src/claude/rules/; a direct src/claude/rules/ reference is refused.
+    if joined.parent.resolve() != RULES_DIR or not any(
+        rule_path.is_relative_to(root) for root in RULES_DIRS
+    ):
         print(
             f"ERROR: rule_path must be under .claude/rules/: {rule_path_str}",
             file=sys.stderr,

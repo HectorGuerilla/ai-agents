@@ -37,6 +37,14 @@ rows:
     plugin_tree: src/copilot-cli/agents
     install_tree: .github/agents
     link: true
+  - class: instructions-github
+    # ADR-119: each shipped Copilot instruction links into the shipped tree;
+    # repo-only rules (scope internal end to end) stay real files here,
+    # rendered by generate_rules.py's repoOnlyOutputDirs.
+    source: templates/rules
+    plugin_tree: src/copilot-cli/instructions
+    install_tree: .github/instructions
+    link: true
   - class: skills-codex
     # ADR-119: Codex loads repository skills from .agents/skills. Each
     # shipped Codex skill links to its rendered directory, so Codex in this
@@ -50,6 +58,9 @@ rows:
     source: templates/rules
     plugin_tree: src/claude/rules
     install_tree: .claude/rules
+    # ADR-119 decision 13: each shipped rule links into src/claude/rules; a
+    # repo-only rule (scope internal end to end) stays a real file here.
+    link: true
   - class: hooks
     # ADR-109 B4: the 14 executables and dispatch_groups.json (15 of the
     # 16 hooks-class files; hooks.json is the hooks-json row below).

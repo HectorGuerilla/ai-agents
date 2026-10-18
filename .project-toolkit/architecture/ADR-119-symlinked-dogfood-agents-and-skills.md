@@ -59,6 +59,8 @@ Two sub-decisions follow from these, because without them the dogfood breaks.
 The owner added one more on 2026-10-17, after asking why `.github/` differed from what ships.
 
 11. **GitHub Copilot runs the shipped agents and hook file.** `.github/agents/<name>.agent.md` links to `../../src/copilot-cli/agents/<name>.agent.md` (`agents-github` row), and `.github/hooks/hooks.json` links to `../../src/copilot-cli/hooks/hooks.json` (`hooks-github` row, now `link: true`). `templates/platforms/github.yaml`, which rendered a second, unpinned agent variant, is deleted. The owner directed on 2026-10-17 to drop the `code-reviewer` model pin, the only difference between the two renders. `.github/agents` is inherit-only (PR #5040: an unrecognized `model:` value silently falls back to the session default, issue #4938), so the repository was not running what it ships. The directive removed the pin on every harness, Claude included. No shipped Copilot agent may now carry `model:`; `test_github_agents_link_to_shipped_copilot_agents_without_a_model_pin` enforces it. `.github/agents/`, `.github/hooks/` leave `OWNED_PREFIXES` for the same reason `.claude/agents/` did. `pr-comment-responder.prompt.md`, `security/`, and `memory-recall.json` stay hand-maintained real files.
+12. **Shipped instructions plus repo-only instructions, merged at `.github/instructions/`.** The owner directed on 2026-10-17: "We may have additional instructions for THIS REPO ONLY in addition to the set that we ship ... Don't drop, merge at .github/." Each shipped `src/copilot-cli/instructions/*.instructions.md` links into `.github/instructions/` (`instructions-github` row). A rule whose scope is internal end to end is repo-only: it still skips every shipped tree, and `generate_rules.py` renders it into `.github/instructions/` as a real file (`repoOnlyOutputDirs`). The link serves the shipped file unchanged, internal globs filtered (issue #4317), so the in-repo Copilot agent runs exactly what consumers run. A repo-only instruction must start at `templates/rules/<name>.md`; `generate_rules.py` prunes any other real file in `.github/instructions/`.
+13. **Repo-only rules stay in `.claude/rules/`; shipped rules are links.** The owner asked on 2026-10-17 why rules and instructions should not split like skills, where `ai-agents-*` skills are repo-local. Each shipped `src/claude/rules/<name>.md` links into `.claude/rules/` (`rules` row, `link: true`). A rule whose scope is internal end to end (`build/scripts/rule_distribution.py`, `is_repo_only`) renders straight to `.claude/rules/<name>.md` as a real file and leaves `src/claude/rules/`, the way a repo-local skill's `SKILL.md` renders into its real `.claude/skills/<name>/`. Six rules are repo-only at `60a2d6f06` (2026-10-17): `adr-records`, `governance`, `push-lock`, `secret-redaction`, `session-logs`, `tool-use-hook-bar`. `generate_rules.py` reads those real files too (`repoOnlySourceDir`), so `.github/instructions/` still gets them. The scope decides, as the Copilot skip has since issue #4317, so one classifier serves both trees. A consumer may have `.claude/`, but these rules cite only this repository's internals. A scope edit can move a rule in or out of the plugin, so `tests/build_scripts/test_rule_distribution.py` pins the six names and fails until the edit is deliberate. A rule that flips from shipped to repo-only replaces its own binplace link on the next build; any other symlink at that path is refused.
 
 ## Rationale
 
@@ -84,9 +86,13 @@ Decision 7 applies drivers 1 and 4 to `src/codex/`. Driver 2 is met by measureme
 - **Keep a separate unpinned `.github/agents` render.** Rejected by the owner on 2026-10-17: it meant the repository's Copilot agents differed from the shipped ones. Dropping the one pin (`code-reviewer`, `model_tier: haiku`) made the renders identical.
 - **Keep the `code-reviewer` pin and link the other 29 agents.** Rejected: a mixed tree, and the pinned agent would still differ from what GitHub runs.
 - **Drop the pin from the Copilot projections only and keep the Claude `haiku` pin** (ADR-111 rule 3 style). Rejected by the owner directive, which named no harness.
-- **Link `.github/instructions/` to `src/copilot-cli/instructions/`.** Not possible. The in-repo tree keeps `.claude/**` globs the shipped tree drops (`keepInternalGlobsFor`).
+- **Link all of `.github/instructions/` to `src/copilot-cli/instructions/`.** Rejected: one directory link leaves no room for the repo-only rules. Per-entry links do (decisions 12 and 13).
+- **Keep internal globs in the shipped Copilot tree, so the linked copies keep them in this repository.** Rejected in review: it would widen 11 shipped rules to consumers' own `.claude/`, `.agents/`, and `.project-toolkit/` trees, reversing issue #4317 for Copilot.
+- **Declare repo-only status with a frontmatter marker, as skills do.** Deferred: the scope already decides the Copilot skip, so a marker would add a second classifier that can disagree with it. The pinned-set test makes a flip a reviewed edit.
+- **Keep shipping the six repo-only rules in the Claude plugin.** Rejected: Copilot already skipped them, their scopes name only this repository's internal trees, and a repo-only skill already stays out of the plugin.
 - **Leave Codex on the marketplace entry only.** Rejected: `.agents/plugins/marketplace.json` sources `./src/codex`, but a marketplace plugin loads only once installed, from a cached copy. Linking `.agents/skills/` makes every Codex session in this repository run `src/codex` directly.
-- **Keep `.github/instructions/` as its own render.** Kept, for now: it is not a byte copy. It keeps `.claude/**`-scoped rules the shipped `src/copilot-cli/instructions/` drops (`keepInternalGlobsFor`), so the in-repo Copilot agent loads the rules for editing `.claude/`. Linking it would drop those rules here; that is a separate owner decision.
+- **Link `.github/instructions/` to the shipped set and drop the repo-only rules.** Rejected by the owner: the in-repo Copilot agent would lose the six repo-only rules. The loss of internal globs on eleven shipped rules was also listed against it; the chosen design keeps that loss. The owner accepted it on 2026-10-17 (D4, "Filtered links") so consumers see no scope change.
+- **Keep `.github/instructions/` as its own render.** Rejected by the owner: it differed from what ships.
 
 ## Prior Art Investigation
 
@@ -123,11 +129,15 @@ Copilot CLI loading of a linked skill directory in this checkout is unverified a
 - **No Copilot agent may pin a model.** `.github/agents/` serves the shipped files, and `.github/agents` is inherit-only (PR #5040: an unrecognized `model:` value silently falls back to the session default, issue #4938); `check_model_pins.py` scans `.github/agents/*.md` through the links. ADR-111 rule 2 (KEEP_PIN) and rule 3 (bare `haiku`) now bind Claude agents only; the `copilot-cli.yaml` `model_tiers` fallback must not emit an agent pin. The `code-reviewer` agent now runs on each harness's default model instead of the Haiku tier; Claude, Copilot CLI, and VS Code renders all lost the pin.
 - **`.github/hooks/hooks.json` loading through a link is unverified** on Copilot CLI and the cloud agent. It registers nothing today; a test keeps its `hooks` map empty until a link-loading probe is recorded.
 - **Linked `.github/agents` on the github.com cloud agent and in VS Code are unverified.** Only Copilot CLI 1.0.98 was probed. After merge, list the custom agents in a cloud-agent session; Reversibility step 4 is the rollback if they are missing.
+- **The Claude plugin ships 23 rules, not 29, at `60a2d6f06` (2026-10-17).** The six repo-only rules leave `src/claude/rules/` (decision 13). A consumer with `.claude/` could have matched `push-lock` or `tool-use-hook-bar`, but their text governs this repository's hooks and push lock. The Copilot plugin already skipped all six.
+- **The in-repo Copilot agent loses internal scopes on 11 shipped rules.** `.github/instructions/` used to keep `.claude/**` and `.agents/**` globs on rules such as `canonical-source-mirror` and `generated-artifacts` (11 at `60a2d6f06`, 2026-10-17). The links now serve the shipped, filtered scope, so editing a `.claude/` path no longer auto-loads them for Copilot. Claude Code reads `.claude/rules/`, which keeps every glob.
+- **Linked `.github/instructions` on the github.com cloud agent and in VS Code are unverified**, like `.github/agents`. Reversibility step 5 is the rollback.
+- **Edit a repo-only rule at its template.** `rule_templates.py` renders it to `.claude/rules/<name>.md`; `--check` owns that real file, and the lossless fixture compares against it.
 - **Cost.** `code-reviewer` moves from the Haiku tier to each harness's default model on every call. A later owner decision could restore a Claude-only pin, since the Copilot constraint does not reach `src/claude/`.
 
 ### Neutral
 
-- `.claude/rules/`, `.claude/hooks/`, and `.claude/lib/` remain byte copies. The same `link: true` flag can cover them in a later change.
+- `.claude/hooks/` and `.claude/lib/` remain byte copies. The same `link: true` flag can cover them in a later change.
 
 ## Impact on Dependent Components
 
@@ -146,6 +156,9 @@ Copilot CLI loading of a linked skill directory in this checkout is unverified a
 - `packages/ai-agents-cli/scripts/build-bundle.ts`: follows links when it bundles `.claude/`.
 - Repository scanners and ratchets that enumerated `.claude/skills` scan `src/claude/skills` once. Several counted both copies before, so their baselines moved down only.
 - `scripts/validation/adr_cited_paths.py`: a cited path under a tracked link exists when its target is tracked.
+- `build/scripts/rule_distribution.py` (new), `rule_templates.py`, `generate_rules.py` (`repoOnlySourceDir`, `repoOnlyOutputDirs`), `validate_templates_schema.py`, and REQ-003 (dated notes on REQ-003-006 and REQ-003-010): decisions 12 and 13. `build_all.py` must compile rules before `generate_rules.py` reads `.claude/rules/`; it already does.
+- `binplace.yaml` `rules` and `instructions-github` rows; `build_all.py`: `.claude/rules/` and `.github/instructions/` leave `OWNED_PREFIXES`, and their real repo-only files are owned one by one.
+- `scripts/eval/eval-rule-activation.py`, `scripts/validation/checks_portability.py`: accept a rule that resolves into `src/claude/rules/` or a repo-only real file.
 
 ## Reversibility Assessment
 
@@ -155,7 +168,8 @@ Reversible in one change set, with these steps.
 2. Restore from history: the support-file mirror in `skill_support_mirror.py`, `.claude/agents/` in `OWNED_PREFIXES`, the `skills-sidecar` install tree, the `.claude/skills/<name>/` existence check in `skill_templates.py`, the `sourceDir` values in `copilot-cli.yaml` and `codex.yaml`, and the scanner roots and baselines.
 3. Remove the `skills-codex` row, the `skills-codex-install` surface, `_CODEX_SKILLS_ROOT` in `binplace_manifest.py`, `scripts/validation/agents_install_roots.py` and its use in `check_agents_write_targets.py`, and their tests; then `git rm` the `.agents/skills` links. Nothing copies there.
 4. For decision 11: restore `templates/platforms/github.yaml` and its allowlist entry in `generate_agents.py`, delete the `agents-github` row, drop `link: true` from `hooks-github`, return `.github/agents/` and `.github/hooks/` to `OWNED_PREFIXES`, and restore the `code-reviewer` pin if wanted.
-5. Decision 10 and decision 9 may stay: with no links, the gate meets no link, and `src/claude/lib/paths.py` fixes the shipped plugin regardless.
+5. For decisions 12 and 13: drop `link: true` from the `rules` row, delete the `instructions-github` row, drop the `repoOnly*` keys, point `render_target` at `src/claude/rules/` for every rule, and return both trees to `OWNED_PREFIXES`. Delete the six real files in `.claude/rules/` and `.github/instructions/` before the first copy run; the build then renders all 29 rules to `src/claude/rules/`.
+6. Decision 10 and decision 9 may stay: with no links, the gate meets no link, and `src/claude/lib/paths.py` fixes the shipped plugin regardless.
 
 ## Related Decisions
 

@@ -410,10 +410,11 @@ def _build_rules(
     below runs.
 
     The mirror generator reads ``src/claude/rules`` (the ``rules`` stanza's
-    ``sourceDir`` since ADR-109 B2), which the compile above just wrote, so
-    one run renders template, plugin tree, and mirrors together; the
-    binplace step that follows every generator copies the plugin tree to
-    ``.claude/rules``.
+    ``sourceDir`` since ADR-109 B2), which the compile above just wrote, and
+    the repo-only rules the compile wrote to ``.claude/rules`` as real files
+    (``repoOnlySourceDir``, ADR-119), so the compile MUST run first. One run
+    renders template, plugin tree, and mirrors together; the binplace step
+    that follows every generator links each shipped rule into ``.claude/rules``.
 
     Mirror generation (``generate_rules.generate_rules``) is still skipped
     when the platform has no ``artifacts.rules`` stanza: there is no
@@ -1206,8 +1207,6 @@ def _is_platform_config(path: Path) -> bool:
 # different prefix, add it here so both behaviors keep covering it.
 OWNED_PREFIXES: tuple[str, ...] = (
     "src/",
-    ".github/instructions/",
-    ".claude/rules/",
     ".claude/lib/",
     ".claude/hooks/",
     ".claude/settings.json",
@@ -1228,6 +1227,16 @@ def _effective_owned_prefixes(repo_root: Path) -> tuple[str, ...]:
     already covers, so its ``owned_targets`` path is dropped here; the
     ``--check`` snapshot also refuses a path behind a symlink.
     """
+    # ADR-119: .github/instructions holds links to the shipped rules plus
+    # real repo-only rules; only the real files are this run's output there.
+    instructions = repo_root / ".github" / "instructions"
+    repo_only_rules = tuple(
+        sorted(
+            str(path.relative_to(repo_root))
+            for path in instructions.glob("*.instructions.md")
+            if not path.is_symlink()
+        )
+    )
     install_root = repo_root / ".claude" / "skills"
     skill_paths = tuple(
         sorted(
@@ -1236,7 +1245,15 @@ def _effective_owned_prefixes(repo_root: Path) -> tuple[str, ...]:
             if path.is_relative_to(install_root)
         )
     )
-    return OWNED_PREFIXES + skill_paths
+    claude_rules = repo_root / ".claude" / "rules"
+    repo_only_claude_rules = tuple(
+        sorted(
+            str(path.relative_to(repo_root))
+            for path in rule_templates.owned_targets(repo_root)
+            if path.is_relative_to(claude_rules)
+        )
+    )
+    return OWNED_PREFIXES + repo_only_rules + repo_only_claude_rules + skill_paths
 
 
 def _is_bytecode_artifact(path: Path) -> bool:

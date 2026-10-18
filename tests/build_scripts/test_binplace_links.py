@@ -225,12 +225,14 @@ def test_manifest_rejects_malformed_link_rows(
         binplace_manifest.load(tmp_path)
 
 
-def test_live_manifest_links_agents_and_skills() -> None:
+def test_live_manifest_links_agents_skills_rules_and_instructions() -> None:
     rows = {row.class_name: row for row in binplace_manifest.load(_REPO_ROOT)}
 
     assert rows["agents"].link is True
     assert rows["skills"].link is True
-    assert rows["rules"].link is False
+    assert rows["rules"].link is True
+    assert rows["instructions-github"].link is True
+    assert rows["hooks"].link is False
     assert rows["skills-sidecar"].install_tree is None
 
 
