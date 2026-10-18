@@ -322,6 +322,8 @@ def verify(tool_root: Path, head_root: Path, base_ref: str, head_sha: str | None
         [path for path in roots if (head_root / path).is_file()], head_root
     )
     forks = _merge_bases(tool_root, base_ref, head_sha)
+    if not forks and head_sha is not None:
+        print("note: no merge base for the head, so STALE reads as CHANGED", file=sys.stderr)
     report = Report(examined=len(closure))
     removed, stale_roots = _missing_roots(tool_root, head_root, base_ref, roots, forks)
     report.removed.extend(removed)
@@ -342,6 +344,8 @@ def verify(tool_root: Path, head_root: Path, base_ref: str, head_sha: str | None
 # `checkout-index` would run on head blobs when the head's .gitattributes names it.
 _NO_SYSTEM_CONFIG = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
 _HEAD_MARKER = "refs/pull/{number}/head"
+# 200 commits clear the largest of 50 merged PRs (66, 2026-10-18); a longer head has no merge base.
+HEAD_FETCH_DEPTH = 200
 
 
 def _git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> str:
@@ -379,6 +383,7 @@ def materialize_head(
         "fetch",
         "--no-tags",
         "--no-recurse-submodules",
+        f"--depth={HEAD_FETCH_DEPTH}",
         remote,
         _HEAD_MARKER.format(number=pull_number),
     )
@@ -406,7 +411,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--head-root", type=Path, help="Pull request head work tree.")
     parser.add_argument(
-        "--head-sha", help="Head commit to fetch and read as data; needs --pull-number."
+        "--head-sha", help="Head commit to read as data; needs --pull-number. Shallows the base."
     )
     parser.add_argument("--pull-number", type=int, help="Pull request number for --head-sha.")
     parser.add_argument(
