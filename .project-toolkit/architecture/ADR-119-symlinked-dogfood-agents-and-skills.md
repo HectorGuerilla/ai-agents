@@ -48,18 +48,19 @@ Ranked.
 4. A repo-local skill (`metadata.distribution: repo-local`) has no plugin copy. It stays a real directory under `.claude/skills/<name>/`, and binplace never links it.
 5. The `.claude/`-to-`src/` support-file mirror is retired. `sync_claude_plugin_skill_support` now only removes a stale plugin copy of a skill that became repo-local. It refuses while `.claude/skills/<name>` is still a link, because the plugin copy is then the only copy.
 6. The `skills-sidecar` row's `install_tree` is null, since `.claude/skills/review/` is a link.
-7. `.claude/agents/` leaves `build_all.OWNED_PREFIXES`. It holds only links, and the `--check` snapshot refuses a symlink under an owned prefix. Its content lives under `src/`, which stays owned.
+7. Codex loads the shipped Codex skills the same way. A `skills-codex` row links each `.agents/skills/<name>` to `../../src/codex/skills/<name>`; Codex loads repository skills from `.agents/skills`. Repo-local skills have no `src/codex` copy, so they stay Claude-only. `.agents/skills` is the only `.agents/` path binplace may write, and only the binplace manifest, `binplace.yaml`, and `surface-parity.yaml` may name it (`scripts/validation/agents_install_roots.py`, read by `check_agents_write_targets.py`).
+8. `.claude/agents/` leaves `build_all.OWNED_PREFIXES`. It holds only links, and the `--check` snapshot refuses a symlink under an owned prefix. Its content lives under `src/`, which stays owned.
 
 Two sub-decisions follow from these, because without them the dogfood breaks.
 
-8. **The portability helper moves to the plugin tree.** Skill scripts find `lib/` beside their real path, which is now `src/claude/lib/`. That directory lacked `paths.py`, so the shipped Claude plugin lacked it too. `src/claude/lib/paths.py` becomes canonical. A `lib-paths` row copies it to `.claude/lib/paths.py`, and Hermes packs gain it (`lib_render.PLUGIN_LIB_FILES`).
-9. **The PR completion gate trusts base-pinned links.** `run_completion_gate.py` refused any symlinked path component, so every `.claude/skills/...` command in `pr-review-config.yaml` halted. The gate now follows a link only when the trusted remote-tracking ref holds the same mode `120000` entry, at the same path under the git toplevel, with identical link text. It keeps scanning the target, so an unpinned link behind a pinned one still halts. A link with absolute text, a link that leaves the work tree, and a chain longer than eight hops halt. The owner chose this design on 2026-10-17.
+9. **The portability helper moves to the plugin tree.** Skill scripts find `lib/` beside their real path, which is now `src/claude/lib/`. That directory lacked `paths.py`, so the shipped Claude plugin lacked it too. `src/claude/lib/paths.py` becomes canonical. A `lib-paths` row copies it to `.claude/lib/paths.py`, and Hermes packs gain it (`lib_render.PLUGIN_LIB_FILES`).
+10. **The PR completion gate trusts base-pinned links.** `run_completion_gate.py` refused any symlinked path component, so every `.claude/skills/...` command in `pr-review-config.yaml` halted. The gate now follows a link only when the trusted remote-tracking ref holds the same mode `120000` entry, at the same path under the git toplevel, with identical link text. It keeps scanning the target, so an unpinned link behind a pinned one still halts. A link with absolute text, a link that leaves the work tree, and a chain longer than eight hops halt. The owner chose this design on 2026-10-17.
 
 ## Rationale
 
-Drivers 1 and 4 decide the mechanism: a link has no second copy to go stale, and it makes this repository execute `src/claude/` exactly as an installed plugin does. Decision 8 is that driver paying off: the link exposed that the shipped Claude plugin had no `paths.py`.
+Drivers 1 and 4 decide the mechanism: a link has no second copy to go stale, and it makes this repository execute `src/claude/` exactly as an installed plugin does. Decision 9 is that driver paying off: the link exposed that the shipped Claude plugin had no `paths.py`.
 
-Driver 2 is met by measurement (Prior Art). Driver 3 shapes decisions 1, 5, and 9: every link target is computed, never trusted from disk, and the gate trusts only links the base branch already holds. Driver 5 is met by CI configuration and a loud failure, not by a copy fallback (Consequences). Per-entry links, not one link for `.claude/skills/`, keep repo-local skills as real directories (decision 4).
+Decision 7 applies drivers 1 and 4 to `src/codex/`. Driver 2 is met by measurement for both Claude Code and Codex (Prior Art). Driver 3 shapes decisions 1, 5, and 10: every link target is computed, never trusted from disk, and the gate trusts only links the base branch already holds. Driver 5 is met by CI configuration and a loud failure, not by a copy fallback (Consequences). Per-entry links, not one link for `.claude/skills/`, keep repo-local skills as real directories (decision 4).
 
 ## Safety
 
@@ -78,7 +79,8 @@ Driver 2 is met by measurement (Prior Art). Driver 3 shapes decisions 1, 5, and 
 - **One link for all of `.claude/agents/`.** Rejected: per-entry links keep one code path for both rows, and a stray file in `.claude/agents/` stays visible as unowned instead of landing in the plugin tree.
 - **Link `.github/agents/` to `src/copilot-cli/agents/`.** Not possible. GitHub rejects a `model:` field in `.github/agents/` (issue #4938), so `templates/platforms/github.yaml` renders that tree separately.
 - **Link `.github/instructions/` to `src/copilot-cli/instructions/`.** Not possible. The in-repo tree keeps `.claude/**` globs the shipped tree drops (`keepInternalGlobsFor`).
-- **Link `.agents/` for Codex.** Not needed. `.agents/plugins/marketplace.json` already sources `./src/codex` directly.
+- **Leave Codex on the marketplace entry only.** Rejected: `.agents/plugins/marketplace.json` sources `./src/codex`, but a marketplace plugin loads only once installed, from a cached copy. Linking `.agents/skills/` makes every Codex session in this repository run `src/codex` directly.
+- **Link `.github/hooks/hooks.json` to `src/copilot-cli/hooks/hooks.json`.** Deferred, not rejected. It is a byte copy, but no probe showed Copilot honoring a linked repository hook file: on Copilot CLI 1.0.98 a hook did not fire from a real file either, so the probe could not discriminate. `generated-artifacts.md` forbids shipping a runtime artifact never executed in its target runtime. The file registers no hook today.
 
 ## Prior Art Investigation
 
@@ -86,7 +88,7 @@ The copy existed because ADR-108 and ADR-109 built the template pipeline on a `.
 
 `memory_enhancement` at the repository root is a tracked symlink to `scripts/memory_enhancement` (git mode `120000`); `scripts/validation/tracked_paths.py` already resolves paths through tracked links.
 
-Copilot CLI loading of a linked skill directory in this checkout is unverified and accepted; the shipped Copilot plugin (`src/copilot-cli/`) holds no links. Claude Code 2.1.302 loads a symlinked skill directory and a symlinked agent file. Probe on 2026-10-17 in a scratch repository: with `.claude/skills/zebra-probe` and `.claude/agents/walrus-probe.md` as relative links into `src/claude/`, `claude -p` listed both. Negative control: with the links removed, it listed neither.
+Copilot CLI loading of a linked skill directory in this checkout is unverified and accepted; the shipped Copilot plugin (`src/copilot-cli/`) holds no links. Codex CLI 0.163.0 loads a symlinked `.agents/skills/<name>`: in a scratch repository it listed the probe skill through the link and listed none without it, and in this repository it reports `chestertons-fence` available and an invented name unavailable. Claude Code 2.1.302 loads a symlinked skill directory and a symlinked agent file. Probe on 2026-10-17 in a scratch repository: with `.claude/skills/zebra-probe` and `.claude/agents/walrus-probe.md` as relative links into `src/claude/`, `claude -p` listed both. Negative control: with the links removed, it listed neither.
 
 ## Consequences
 
@@ -103,9 +105,14 @@ Copilot CLI loading of a linked skill directory in this checkout is unverified a
 - **Enumerators.** `Path.rglob`, `os.walk`, and `git ls-files` do not descend into a linked directory. A gate that enumerated `.claude/skills` silently scanned only repo-local skills until it was pointed at `src/claude/skills`.
 - **CI path filters.** A support-file edit appears in a diff only under `src/claude/`. Filters, `labeler.yml`, `CODEOWNERS`, and `scripts/ci/path_policy.yml` now name `src/claude/skills` or `src/claude/agents` beside each `.claude/` pattern.
 - **Windows.** A checkout needs `core.symlinks=true` and symlink privilege (Developer Mode). Without them git writes each link as a text file holding its target, and `build_all.py --check` reports drift. Creating a link without privilege exits 2 with a message naming both settings. The two Windows CI jobs that read `.claude/` (`cli-smoke.yml`, the `test-windows-pwsh` job in `pytest.yml`) set `core.symlinks` before checkout.
-- **Gate transition window.** Decision 9 pins links from the trusted ref. Until a new link reaches `origin/main`, the completion gate halts for any criterion that reaches it through `.claude/`. That includes the PR that introduces this record, and any PR that adds a skill or agent. Remedies: pass `--config src/claude/skills/pr-review/pr-review-config.yaml` (byte-identical at the base), or record the reviewed one-time override. Fetch `origin` after the merge.
+- **Gate transition window.** Decision 10 pins links from the trusted ref. Until a new link reaches `origin/main`, the completion gate halts for any criterion that reaches it through `.claude/`. That includes the PR that introduces this record, and any PR that adds a skill or agent. Remedies: pass `--config src/claude/skills/pr-review/pr-review-config.yaml` (byte-identical at the base), or record the reviewed one-time override. Fetch `origin` after the merge.
 - **Known gate debt.** The completion gate's module and dynamic-load resolvers do not all return the post-link path. A criterion that imports through a pinned link can halt as untrusted. This fails closed, so the cost is a false halt, not a bypass.
 - **Coverage.** `coverage.py` records the real path, so `src/claude` joins `[tool.coverage.run] source`, and the REQ-009 gate's `--include` names the `src/claude/skills/...` path.
+
+- **Codex skill links point at generated files.** `src/codex/skills/` renders from `src/claude/skills/`, so an edit made through `.agents/skills/<name>/` is overwritten by the next build. Edit `src/claude/skills/` (support files) or `templates/skills/` (`SKILL.md`).
+- **Codex lists a skill twice when the plugin is also enabled.** With `project-toolkit@ai-agents` enabled, Codex 0.163.0 in this repository lists `chestertons-fence` (the repository link) and `project-toolkit:chestertons-fence` (the plugin's cached copy). The names differ, so nothing collides; the bare name runs `src/codex` directly. Disable the plugin in this checkout to see one copy. Whether Copilot CLI or VS Code also scans `.agents/skills`, and would list a second render beside `.claude/skills`, is unverified.
+- **`.agents/skills` has no snapshot guard.** `build_all.assert_no_claude_writes` covers `.claude/` only. `binplace_links.py` alone governs `.agents/skills`, with the same computed-target and symlinked-entry checks.
+- `.agents/skills` gains 104 link entries (mode `120000`), one per `src/codex/skills` directory.
 
 ### Neutral
 
@@ -119,8 +126,10 @@ Copilot CLI loading of a linked skill directory in this checkout is unverified a
 - `build/scripts/build_all.py`: `.claude/agents/` leaves `OWNED_PREFIXES`.
 - `build/scripts/lib_render.py`: Hermes packs include `paths.py`.
 - `build/scripts/check_surface_parity.py`: a binplace row whose `source` is its `plugin_tree` may describe that tree as `independent`.
+- `scripts/validation/check_agents_write_targets.py` with `agents_install_roots.py`: `.agents/skills` was the retired #5421 path; its install-root owners may now name it, and every other file still may not.
+- `templates/platforms/binplace.yaml` `skills-codex` row and `templates/platforms/surface-parity.yaml` `skills-codex-install` surface: decision 7.
 - `templates/platforms/copilot-cli.yaml` and `codex.yaml`: `sourceDir` reads `src/claude/skills`, the real directory.
-- `src/claude/skills/github/scripts/pr/run_completion_gate.py`: decision 9.
+- `src/claude/skills/github/scripts/pr/run_completion_gate.py`: decision 10.
 - `packages/ai-agents-cli/scripts/build-bundle.ts`: follows links when it bundles `.claude/`.
 - Repository scanners and ratchets that enumerated `.claude/skills` scan `src/claude/skills` once. Several counted both copies before, so their baselines moved down only.
 - `scripts/validation/adr_cited_paths.py`: a cited path under a tracked link exists when its target is tracked.
@@ -131,13 +140,15 @@ Reversible in one change set, with these steps.
 
 1. Remove `link: true` from the `agents` and `skills` rows and run `build_all.py`. The copy path unlinks each leftover top-level install link, then copies real files; `--check` reports any link it finds on a copy row as drift (`test_dropping_link_true_restores_real_directories`).
 2. Restore from history: the support-file mirror in `skill_support_mirror.py`, `.claude/agents/` in `OWNED_PREFIXES`, the `skills-sidecar` install tree, the `.claude/skills/<name>/` existence check in `skill_templates.py`, the `sourceDir` values in `copilot-cli.yaml` and `codex.yaml`, and the scanner roots and baselines.
-3. Decision 9 and decision 8 may stay: with no links, the gate meets no link, and `src/claude/lib/paths.py` fixes the shipped plugin regardless.
+3. Remove the `skills-codex` row, the `skills-codex-install` surface, `_CODEX_SKILLS_ROOT` in `binplace_manifest.py`, `scripts/validation/agents_install_roots.py` and its use in `check_agents_write_targets.py`, and their tests; then `git rm` the `.agents/skills` links. Nothing copies there.
+4. Decision 10 and decision 9 may stay: with no links, the gate meets no link, and `src/claude/lib/paths.py` fixes the shipped plugin regardless.
 
 ## Related Decisions
 
 - ADR-109 (template-first plugin distribution): amended. Its Alternative D is adopted for agents and skills, and its 2026-09-15 support-file amendment is retired for shipped skills. Both carry a dated note pointing here.
 - ADR-108 (template-owned skill files): amended. The not-a-symlink existence check applies to `src/claude/skills/<name>/` for shipped skills. It carries a dated note pointing here.
 - ADR-052: superseded by ADR-109; unchanged.
+- ADR-012 (proposed): reserves `.agents/skills/*.md` for learned-pattern files. Decision 7 gives `.agents/skills/` to Codex skill links instead; the owner should retire or amend ADR-012's use of the name.
 
 ## Review
 

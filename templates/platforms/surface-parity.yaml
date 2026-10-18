@@ -241,6 +241,13 @@ surfaces:
     authority: scripts/validation/validate_review_marker.py
     generator: build/scripts/lib_mirror.py
     owner: build_all.py --check
+  - id: skills-codex-install
+    path: .agents/skills
+    relation: binplaced
+    authority: src/codex/skills
+    generator: build/scripts/binplace_manifest.py
+    owner: build_all.py --check
+    reason: Codex's repository skill directory; each entry links to src/codex/skills (ADR-119).
   - id: skills-codex
     path: src/codex/skills
     relation: translated

@@ -98,6 +98,7 @@ from yaml_loader import ConfigError, load_platform_config, validate_relative_pat
 
 _MANIFEST_REL = Path("templates") / "platforms" / "binplace.yaml"
 _SKILLS_COMPILE_DELEGATE = "skill_templates"
+_CODEX_SKILLS_ROOT = ".agents/skills"
 
 
 class BinplaceConfigError(Exception):
@@ -177,18 +178,21 @@ def _raise_if_ancestor_symlinked(repo_root: Path, label: str, path: Path) -> Non
 
 
 def _validate_install_tree_prefix(label: str, value: str) -> None:
-    """Reject an ``install_tree`` that does not name a ``.claude/`` or ``.github/`` path.
+    """Reject an ``install_tree`` outside the install roots this manifest governs.
 
     Every row's ``install_tree`` is a write target this manifest legitimizes
     (DESIGN-025: "Each row's ``install_tree`` value is a path prefix under
     ``.claude/`` or ``.github/``"); a row naming anything else would widen
-    ``claude_allowlist``'s and ``binplace``'s reach past the two plugin
-    install roots this record governs.
+    ``claude_allowlist``'s and ``binplace``'s reach. ADR-119 adds exactly one
+    more: ``.agents/skills``, Codex's repository skill directory. The rest of
+    ``.agents/`` is governance and history, never an install target.
     """
     # A bare root would allowlist the whole tree; require a segment past it.
-    if value.startswith(".claude/") or value.startswith(".github/"):
+    if value.startswith((".claude/", ".github/")) or value == _CODEX_SKILLS_ROOT:
         return
-    raise BinplaceConfigError(f"{label} {value!r} must be under .claude/ or .github/")
+    raise BinplaceConfigError(
+        f"{label} {value!r} must be under .claude/ or .github/, or be {_CODEX_SKILLS_ROOT}"
+    )
 
 
 def load(repo_root: Path) -> list[Row]:

@@ -29,6 +29,15 @@ rows:
     install_tree: .claude/skills
     compile: skill_templates
     link: true
+  - class: skills-codex
+    # ADR-119: Codex loads repository skills from .agents/skills. Each
+    # shipped Codex skill links to its rendered directory, so Codex in this
+    # repository runs what src/codex ships. No compile: generate_skills.py
+    # renders src/codex/skills before binplace runs.
+    source: src/codex/skills
+    plugin_tree: src/codex/skills
+    install_tree: .agents/skills
+    link: true
   - class: rules
     source: templates/rules
     plugin_tree: src/claude/rules

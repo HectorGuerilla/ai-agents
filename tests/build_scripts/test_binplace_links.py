@@ -284,3 +284,40 @@ def test_a_suffix_shaped_stray_is_still_reported(tmp_path: Path) -> None:
     outcome = binplace_links.link_row(plugin, install, check=True)
 
     assert str(install / "evil.binplace-link") in outcome.unowned
+
+
+@pytest.mark.parametrize(
+    ("install_tree", "accepted"),
+    [
+        (".agents/skills", True),
+        (".agents/governance", False),
+        (".agents", False),
+        (".agents/skillsx", False),
+        (".agents/skills/sub", False),
+    ],
+)
+def test_codex_skills_is_the_only_agents_install_root(
+    tmp_path: Path, install_tree: str, accepted: bool
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "src" / "codex" / "skills").mkdir(parents=True)
+    platforms = tmp_path / "templates" / "platforms"
+    platforms.mkdir(parents=True)
+    (platforms / "binplace.yaml").write_text(
+        'schemaVersion: "1.0"\nrows:\n  - class: skills-codex\n    source: src/codex/skills\n'
+        f"    plugin_tree: src/codex/skills\n    install_tree: {install_tree}\n    link: true\n",
+        encoding="utf-8",
+    )
+
+    if accepted:
+        assert binplace_manifest.load(tmp_path)[0].install_tree == tmp_path / install_tree
+    else:
+        with pytest.raises(binplace_manifest.BinplaceConfigError, match="must be under"):
+            binplace_manifest.load(tmp_path)
+
+
+def test_live_manifest_links_codex_skills_into_agents() -> None:
+    rows = {row.class_name: row for row in binplace_manifest.load(_REPO_ROOT)}
+
+    assert rows["skills-codex"].link is True
+    assert rows["skills-codex"].install_tree == _REPO_ROOT / ".agents" / "skills"
