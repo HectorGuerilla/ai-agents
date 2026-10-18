@@ -3280,12 +3280,68 @@ def stage_generated(kind: str, repo_root: Path) -> int:
         relative_paths.append(relative_path)
     if not relative_paths:
         return 0
+    snapshot = _index_snapshot(repo_root)
     for chunk in _chunk_paths(relative_paths):
         result = _run_git(repo_root, ["add", "--", *chunk])
         if result.returncode != 0:
             _print_process_output(result)
+            _restore_staged_paths(repo_root, snapshot, relative_paths)
             return result.returncode
     return 0
+
+
+_UNSTAGE_FAILED = "WARNING: could not unstage the generated paths after a staging failure."
+
+
+def _index_snapshot(repo_root: Path) -> str | None:
+    """Return a tree object id for the current index, or None when it cannot be written.
+
+    ``git write-tree`` refuses an index with unmerged entries. A None snapshot
+    means the staging loop cannot be rolled back.
+    """
+    result = _run_git(repo_root, ["write-tree"])
+    tree = result.stdout.strip() if result.returncode == 0 else ""
+    return tree or None
+
+
+def _restore_staged_paths(repo_root: Path, snapshot: str | None, paths: Sequence[str]) -> None:
+    """Put the index entries for ``paths`` back to ``snapshot`` after a failed staging loop.
+
+    A failed chunk leaves the earlier chunks staged (and ``git add`` can stage
+    part of the failing chunk), so the commit would carry a partly staged
+    generated set. Restoring from the snapshot, not from HEAD, keeps any change
+    the user staged to these paths before the hook ran. The worktree is not
+    touched. A restore that fails is reported and never changes the exit code.
+    """
+    if snapshot is None:
+        print(
+            "WARNING: could not snapshot the index, so a partly staged generated set "
+            "was left staged; run `git restore --staged` on the generated paths.",
+            file=sys.stderr,
+        )
+        return
+    for chunk in _chunk_paths(paths):
+        # Only paths whose index entry differs from the snapshot: restore errors
+        # on a path that is in neither the index nor the snapshot.
+        # Bytes, then fsdecode: text mode replaces invalid UTF-8 in a name, and
+        # the restore would then miss the file that was staged.
+        drift = _run_git_bytes(
+            repo_root, ["diff-index", "--cached", "--name-only", "-z", snapshot, "--", *chunk]
+        )
+        if drift.returncode != 0:
+            print(drift.stdout.decode("utf-8", errors="replace"), end="")
+            print(drift.stderr.decode("utf-8", errors="replace"), end="", file=sys.stderr)
+            print(_UNSTAGE_FAILED, file=sys.stderr)
+            return
+        changed_names = [os.fsdecode(name) for name in drift.stdout.split(b"\0") if name]
+        for changed in _chunk_paths(changed_names):
+            result = _run_git(
+                repo_root, ["restore", "--staged", f"--source={snapshot}", "--", *changed]
+            )
+            if result.returncode != 0:
+                _print_process_output(result)
+                print(_UNSTAGE_FAILED, file=sys.stderr)
+                return
 
 
 def extract_session_episodes(paths: Sequence[str], repo_root: Path) -> int:
