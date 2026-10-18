@@ -1904,8 +1904,23 @@ def _module_files(dotted: str, roots: list[Path], toplevel: Path) -> list[str]:
     trusted verdict unless the initializer is in the closure too. An ancestor with
     no ``__init__.py`` is a namespace package and contributes nothing. An ancestor
     initializer reached through a symlink is not followed, like any other symlink.
+
+    Every root that holds the module contributes its copy, not only the first.
+    Which copy runs depends on how the verifier's own path was spelled and on
+    plugin-root environment variables (ADR-119: ``.claude/lib`` beside a link,
+    ``src/claude/lib`` beside its target), so each candidate is compared.
     """
-    resolved = _resolve_module_root(dotted, roots, toplevel)
+    files: list[str] = []
+    for root in roots:
+        for found in _module_files_in_root(dotted, root, toplevel):
+            if found not in files:
+                files.append(found)
+    return files
+
+
+def _module_files_in_root(dotted: str, root: Path, toplevel: Path) -> list[str]:
+    """:func:`_module_files` for one root: its initializers, then the module."""
+    resolved = _resolve_module_root(dotted, [root], toplevel)
     if resolved is None:
         return []
     root, module = resolved

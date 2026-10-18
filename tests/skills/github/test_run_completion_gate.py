@@ -5146,6 +5146,24 @@ class TestPinnedLinkTrust:
         assert rc == 2
         assert not marker.exists(), "an edited module the verifier imports must not run"
 
+    def test_pr_edit_to_the_lib_beside_the_link_target_halts(self, git_repo, tmp_path):
+        # The command names the target path (as a plugin root set to the
+        # in-repo src/claude would), so the verifier loads b/lib, not the
+        # a/lib beside the link. Both copies must be compared, not the first.
+        marker = tmp_path / "ran.txt"
+        files = self._aliased_lib_layout(tmp_path, marker)
+        config_path = _write_config(
+            tmp_path, [_script_criterion("Target", tmp_path / "b" / "real" / "verify.py")]
+        )
+        _commit_as_trusted(git_repo, config_path, *files, tmp_path / "a" / "linked")
+        (tmp_path / "b" / "lib" / "mod.py").write_text("VALUE = 2\n", encoding="utf-8")
+        _git(git_repo, "commit", "-q", "-am", "PR edits the target-side lib")
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1"])
+
+        assert rc == 2
+        assert not marker.exists(), "an edited module the verifier imports must not run"
+
     def test_link_the_pr_adds_halts(self, git_repo, tmp_path):
         marker = tmp_path / "ran.txt"
         (tmp_path / "real").mkdir()

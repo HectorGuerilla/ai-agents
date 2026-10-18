@@ -13,7 +13,8 @@ Safety (CWE-22 and CWE-59):
 - Every link target is computed here from the validated plugin tree. A link
   already on disk is never trusted; its text must equal the computed target.
 - A plugin entry that is itself a symlink, or resolves outside the plugin
-  tree, is refused (exit 2), so a link never chains through the plugin tree.
+  tree, is refused (exit 2), so no install link chains through a top-level
+  plugin entry. Symlinks nested inside an entry are not checked here.
 - Only top-level names under ``install_tree`` are touched. A name in
   ``skip_names`` (a ``distribution: repo-local`` skill, which has no
   plugin-tree copy) is never linked, replaced, or reported.
