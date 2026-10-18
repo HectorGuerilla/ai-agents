@@ -8,7 +8,8 @@ artifacts:
     outputSuffix: ".agent.md"
     excludeFilenames: ["AGENTS.md", "CLAUDE.md"]
   skills:
-    sourceDir: ".claude/skills"
+    # ADR-119: read the plugin tree, the real directory .claude/skills links to.
+    sourceDir: "src/claude/skills"
     outputDir: "src/copilot-cli/skills"
     mode: "directory-copy"
     # merge-resolver is hard-wired to this repo's layout (gh, .project-toolkit/sessions,

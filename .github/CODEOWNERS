@@ -9,6 +9,8 @@
 
 # Canonical /review axis criteria (CI prompts are generated from these).
 /.claude/skills/review/references/        @rjmurillo
+# .claude/skills/review links to src/claude/skills/review (ADR-119); edits land here.
+/src/claude/skills/review/references/     @rjmurillo
 
 # Generated CI review prompts (pr-quality gate, per role).
 /.github/prompts/pr-quality-gate-*.md     @rjmurillo

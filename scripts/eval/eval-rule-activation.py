@@ -1990,6 +1990,14 @@ def _parse_args() -> argparse.Namespace:
 
 RULES_DIR = (REPO_ROOT / ".claude" / "rules").resolve()
 SKILLS_DIR = (REPO_ROOT / ".claude" / "skills").resolve()
+# Shipped skills are symlinks from .claude/skills/<name> into src/claude/skills/
+# (ADR-119), so a resolved shipped skill lives under the second root.
+SKILLS_DIRS = (SKILLS_DIR, (REPO_ROOT / "src" / "claude" / "skills").resolve())
+
+
+def _is_under_skills_dir(path: Path) -> bool:
+    """True when a resolved path sits under a trusted skills root."""
+    return any(path.is_relative_to(root) for root in SKILLS_DIRS)
 
 
 def _read_scenarios_json(spath: Path) -> dict[str, Any] | int:
@@ -2147,9 +2155,7 @@ def _resolve_skill_path(skill_path_str: str) -> Path | int:
     `full` mechanism from sending arbitrary skill-tree content to the API.
     """
     skill_path = (REPO_ROOT / skill_path_str).resolve()
-    try:
-        skill_path.relative_to(SKILLS_DIR)
-    except ValueError:
+    if not _is_under_skills_dir(skill_path):
         print(
             f"ERROR: skill_path must be under .claude/skills/: {skill_path_str}",
             file=sys.stderr,
@@ -2174,9 +2180,7 @@ def _resolve_skill_reference(
     """Resolve and validate a skill SKILL.md plus one reference file."""
     skill_path = (REPO_ROOT / skill_path_str).resolve()
     reference_path = (REPO_ROOT / reference_path_str).resolve()
-    try:
-        skill_path.relative_to(SKILLS_DIR)
-    except ValueError:
+    if not _is_under_skills_dir(skill_path):
         print(
             f"ERROR: skill_path must be under .claude/skills/: {skill_path_str}",
             file=sys.stderr,

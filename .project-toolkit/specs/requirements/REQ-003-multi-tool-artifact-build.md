@@ -200,7 +200,7 @@ artifacts:
     outputSuffix: ".agent.md"
     excludeFilenames: ["AGENTS.md", "CLAUDE.md"]
   skills:
-    sourceDir: ".claude/skills"
+    sourceDir: "src/claude/skills"   # ADR-119: the real directory each .claude/skills/<name> links to
     outputDir: "src/copilot-cli/skills"
     mode: "directory-copy"
     excludeFilenames: ["AGENTS.md", "CLAUDE.md", "merge-resolver"]

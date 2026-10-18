@@ -44,7 +44,10 @@ Public API:
         ``check=True`` mode nothing is written and a byte mismatch is
         reported as drift instead. A file under ``install_tree`` with no
         counterpart under ``plugin_tree`` is left untouched and reported as
-        ``unowned``, never deleted.
+        ``unowned``, never deleted. A row with ``link: true`` places a
+        relative symlink per top-level plugin entry instead of copying bytes
+        (``binplace_links.py``), so its install tree reads the plugin tree
+        directly and cannot go stale.
 
 Stricter/looser/different than canonical (``skill_templates.py``):
 
@@ -81,6 +84,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+import binplace_links  # noqa: E402
 import skill_templates  # noqa: E402
 from atomic_write import (  # noqa: E402
     is_redirecting,
@@ -116,6 +120,7 @@ class Row:
     plugin_tree: Path | None
     install_tree: Path | None
     compile: str | None = None
+    link: bool = False
 
 
 @dataclass
@@ -275,7 +280,37 @@ def _load_one_row(
     compile_raw = entry.get("compile")
     compile_name = str(compile_raw) if compile_raw is not None else None
 
-    return Row(class_name, source, plugin_tree, install_tree, compile_name)
+    link = _load_link_flag(manifest_path, class_name, entry, plugin_tree, install_tree)
+    return Row(class_name, source, plugin_tree, install_tree, compile_name, link)
+
+
+def _load_link_flag(
+    manifest_path: Path,
+    class_name: str,
+    entry: dict[object, object],
+    plugin_tree: Path | None,
+    install_tree: Path | None,
+) -> bool:
+    """Return the row's ``link`` flag, refusing a value or row shape it cannot serve.
+
+    A link row needs a directory-shaped plugin tree and an install tree: it
+    links each top-level plugin entry by name, so a file-shaped row (such as
+    ``hooks-json``) or a row with no second hop has nothing to link.
+    """
+    raw = entry.get("link", False)
+    if not isinstance(raw, bool):
+        raise BinplaceConfigError(f"{manifest_path}: row {class_name!r} `link` must be a boolean")
+    if not raw:
+        return False
+    if plugin_tree is None or install_tree is None:
+        raise BinplaceConfigError(
+            f"{manifest_path}: row {class_name!r} sets `link` without both trees"
+        )
+    if plugin_tree.is_file():
+        raise BinplaceConfigError(
+            f"{manifest_path}: row {class_name!r} sets `link` on a file-shaped plugin_tree"
+        )
+    return True
 
 
 def claude_allowlist(repo_root: Path) -> set[Path]:
@@ -299,8 +334,14 @@ def claude_allowlist(repo_root: Path) -> set[Path]:
     for row in load(repo_root):
         if row.install_tree is None or not _is_claude_rooted(row.install_tree, repo_root):
             continue
+        if row.link and row.plugin_tree is not None:
+            allow |= binplace_links.install_link_paths(
+                row.plugin_tree, row.install_tree, _repo_local_skill_dirs(repo_root, row)
+            )
         if row.compile == _SKILLS_COMPILE_DELEGATE:
             allow |= skill_templates.owned_targets(repo_root)
+            continue
+        if row.link:
             continue
         if row.plugin_tree is None:
             if row.compile is not None:
@@ -397,6 +438,17 @@ def binplace(repo_root: Path, *, check: bool) -> BinplaceResult:
             # A row with no install_tree (ADR-109 B5's Copilot-side lib
             # rows) has no second hop: its plugin_tree IS the final output.
             continue
+        if row.link:
+            _fold_link_outcome(
+                result,
+                binplace_links.link_row(
+                    row.plugin_tree,
+                    row.install_tree,
+                    check=check,
+                    skip_names=_repo_local_skill_dirs(repo_root, row),
+                ),
+            )
+            continue
         _binplace_one_row(
             row.plugin_tree,
             row.install_tree,
@@ -405,6 +457,15 @@ def binplace(repo_root: Path, *, check: bool) -> BinplaceResult:
             skip_top_dirs=_repo_local_skill_dirs(repo_root, row),
         )
     return result
+
+
+def _fold_link_outcome(result: BinplaceResult, outcome: binplace_links.LinkOutcome) -> None:
+    """Merge one link row's outcome into the run-wide :class:`BinplaceResult`."""
+    result.written.extend(outcome.written)
+    result.unowned.extend(outcome.unowned)
+    result.drifted.extend(outcome.drifted)
+    result.skipped.extend(outcome.skipped)
+    result.exit_code = max(result.exit_code, outcome.exit_code)
 
 
 def _repo_local_skill_dirs(repo_root: Path, row: Row) -> frozenset[str]:
@@ -444,6 +505,7 @@ def _binplace_one_row(
         return
     if not plugin_tree.is_dir():
         return
+    _replace_install_links(install_tree, check=check, result=result, skip=skip_top_dirs)
     owned_relatives: set[Path] = set()
     for src_path in sorted(plugin_tree.rglob("*")):
         rel = src_path.relative_to(plugin_tree)
@@ -464,6 +526,30 @@ def _binplace_one_row(
             continue
         if rel not in owned_relatives:
             result.unowned.append(str(existing))
+
+
+def _replace_install_links(
+    install_tree: Path, *, check: bool, result: BinplaceResult, skip: frozenset[str]
+) -> None:
+    """Remove top-level install links left by a ``link: true`` row now copied.
+
+    Without this, turning ``link`` off (the ADR-119 rollback) leaves each
+    directory link in place: the copy writes through the link into the
+    plugin tree, finds equal bytes, and reports nothing. A link is drift in
+    check mode and is unlinked in write mode, so the copy below then fills a
+    real directory. Only the link itself is removed, never its target.
+    """
+    if not install_tree.is_dir():
+        return
+    for entry in sorted(install_tree.iterdir()):
+        if entry.name in skip or not entry.is_symlink():
+            continue
+        if check:
+            result.drifted.append(str(entry))
+            result.exit_code = max(result.exit_code, 2)
+            continue
+        entry.unlink()
+        result.written.append(str(entry))
 
 
 def _current_bytes(dst_path: Path) -> bytes | None:

@@ -801,12 +801,15 @@ class TestRepositoryConfigContract:
     """Keep the trusted repository config inside the safe evaluator subset."""
 
     def test_ready_criterion_expression_is_evaluable(self, monkeypatch, capsys):
-        # .claude/skills/pr-review/pr-review-config.yaml is the live configuration
-        # consumed by /pr-autofix before it enables auto-merge. Drive main()
-        # through every production criterion so this contract covers config
-        # loading, dispatch, and the final process verdict, not just the private
-        # expression helper.
-        config_path = _REPO_ROOT / ".claude" / "skills" / "pr-review" / "pr-review-config.yaml"
+        # The pr-review config is the live configuration consumed by /pr-autofix
+        # before it enables auto-merge. Drive main() through every production
+        # criterion so this contract covers config loading, dispatch, and the
+        # final process verdict, not just the private expression helper. Load it
+        # from src/claude: `.claude/skills/<name>` is a symlink into that tree
+        # (ADR-119) and the gate refuses a symlinked config path (CWE-59).
+        config_path = (
+            _REPO_ROOT / "src" / "claude" / "skills" / "pr-review" / "pr-review-config.yaml"
+        )
         monkeypatch.setattr(
             _dispatcher,
             "_verify_config_trust",
@@ -5049,3 +5052,224 @@ class TestInstallTrustedPathConsistency:
         # problem. The exit-3 branch is a different failure and has its
         # own cases; asserting the code here keeps the two from merging.
         assert resolved.exit_code == 2, resolved.exit_code
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need Developer Mode on Windows")
+class TestPinnedLinkTrust:
+    """ADR-119: a relative symlink the trusted ref already holds is followed.
+
+    The base branch vouches for the link blob, and the target file is still
+    byte-compared at the trusted ref. A link the PR adds or retargets, or an
+    unpinned link reached through a pinned one, still halts before dispatch.
+    """
+
+    def test_pinned_directory_link_dispatches_and_compares_the_target(
+        self,
+        git_repo,
+        tmp_path,
+        capsys,
+    ):
+        marker = tmp_path / "ran.txt"
+        (tmp_path / "real").mkdir()
+        _write_marker_script(tmp_path / "real" / "verify.py", marker)
+        (tmp_path / "linked").symlink_to("real", target_is_directory=True)
+        config_path = _write_config(
+            tmp_path,
+            [_script_criterion("Pinned", tmp_path / "linked" / "verify.py")],
+        )
+        _commit_as_trusted(
+            git_repo, config_path, tmp_path / "real" / "verify.py", tmp_path / "linked"
+        )
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1", "--json"])
+
+        assert rc == 0
+        assert marker.exists()
+        payload = json.loads(capsys.readouterr().out)
+        assert "real/verify.py" in payload["command_trust"]["checked_files"]
+
+    def test_link_the_pr_adds_halts(self, git_repo, tmp_path):
+        marker = tmp_path / "ran.txt"
+        (tmp_path / "real").mkdir()
+        _write_marker_script(tmp_path / "real" / "verify.py", marker)
+        config_path = _write_config(
+            tmp_path,
+            [_script_criterion("Added", tmp_path / "linked" / "verify.py")],
+        )
+        _commit_as_trusted(git_repo, config_path, tmp_path / "real" / "verify.py")
+        (tmp_path / "linked").symlink_to("real", target_is_directory=True)
+        _git(git_repo, "add", "linked")
+        _git(git_repo, "commit", "-q", "-m", "PR adds a link")
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1"])
+
+        assert rc == 2
+        assert not marker.exists(), "a link absent from the trusted ref must not dispatch"
+
+    def test_link_the_pr_retargets_at_trusted_bytes_halts(self, git_repo, tmp_path):
+        # Both targets hold trusted bytes, so only the link text differs.
+        # Without pinning the link text, the resolved target would compare
+        # equal and the retargeted script would run.
+        good_marker = tmp_path / "good.txt"
+        evil_marker = tmp_path / "evil.txt"
+        for name, marker in (("good", good_marker), ("evil", evil_marker)):
+            (tmp_path / name).mkdir()
+            _write_marker_script(tmp_path / name / "verify.py", marker)
+        (tmp_path / "linked").symlink_to("good", target_is_directory=True)
+        config_path = _write_config(
+            tmp_path,
+            [_script_criterion("Retarget", tmp_path / "linked" / "verify.py")],
+        )
+        _commit_as_trusted(
+            git_repo,
+            config_path,
+            tmp_path / "good" / "verify.py",
+            tmp_path / "evil" / "verify.py",
+            tmp_path / "linked",
+        )
+        (tmp_path / "linked").unlink()
+        (tmp_path / "linked").symlink_to("evil", target_is_directory=True)
+        _git(git_repo, "add", "linked")
+        _git(git_repo, "commit", "-q", "-m", "PR retargets the link")
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1"])
+
+        assert rc == 2
+        assert not evil_marker.exists()
+        assert not good_marker.exists()
+
+    def test_unpinned_link_behind_a_pinned_link_halts(self, git_repo, tmp_path):
+        evil_marker = tmp_path / "evil.txt"
+        (tmp_path / "stage").mkdir()
+        _write_marker_script(tmp_path / "stage" / "verify.py", tmp_path / "good.txt")
+        (tmp_path / "evil").mkdir()
+        _write_marker_script(tmp_path / "evil" / "verify.py", evil_marker)
+        (tmp_path / "linked").symlink_to("stage", target_is_directory=True)
+        config_path = _write_config(
+            tmp_path,
+            [_script_criterion("Chain", tmp_path / "linked" / "verify.py")],
+        )
+        _commit_as_trusted(
+            git_repo,
+            config_path,
+            tmp_path / "stage" / "verify.py",
+            tmp_path / "evil" / "verify.py",
+            tmp_path / "linked",
+        )
+        _git(git_repo, "rm", "-q", "-r", "stage")
+        (tmp_path / "stage").symlink_to("evil", target_is_directory=True)
+        _git(git_repo, "add", "stage")
+        _git(git_repo, "commit", "-q", "-m", "PR swaps the target dir for a link")
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1"])
+
+        assert rc == 2
+        assert not evil_marker.exists()
+
+    def test_config_through_a_pinned_link_verifies(self, git_repo, tmp_path):
+        (tmp_path / "real").mkdir()
+        config_path = _write_config(tmp_path / "real", [])
+        (tmp_path / "cfg").symlink_to("real", target_is_directory=True)
+        _commit_as_trusted(git_repo, config_path, tmp_path / "cfg")
+
+        rc = _dispatcher.main(
+            [
+                "--config",
+                "cfg/pr-review-config.yaml",
+                "--pull-request",
+                "1",
+                "--verify-config-only",
+            ],
+        )
+
+        assert rc == 0
+
+    def test_config_through_an_unpinned_link_halts(self, git_repo, tmp_path, capsys):
+        (tmp_path / "real").mkdir()
+        config_path = _write_config(tmp_path / "real", [])
+        _commit_as_trusted(git_repo, config_path)
+        (tmp_path / "cfg").symlink_to("real", target_is_directory=True)
+
+        rc = _dispatcher.main(
+            [
+                "--config",
+                "cfg/pr-review-config.yaml",
+                "--pull-request",
+                "1",
+                "--verify-config-only",
+            ],
+        )
+
+        assert rc == 2
+        assert "symlinked component" in capsys.readouterr().err
+
+    def test_a_local_ref_pins_no_links(self, git_repo, tmp_path):
+        (tmp_path / "real").mkdir()
+        (tmp_path / "linked").symlink_to("real", target_is_directory=True)
+        (tmp_path / "real" / "f").write_text("x", encoding="utf-8")
+        _git(git_repo, "add", "linked", "real/f")
+        _git(git_repo, "commit", "-q", "-m", "local only")
+
+        assert _dispatcher._load_pinned_links("HEAD", git_repo) is None
+        _git(git_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        pinned = _dispatcher._load_pinned_links("origin/main", git_repo)
+        assert pinned is not None
+        assert pinned[0].resolve() == git_repo.resolve()
+        assert pinned[1] == {"linked": "real"}
+
+    def _pinned_criterion_halts(self, git_repo, tmp_path, link: Path, target: str) -> None:
+        marker = tmp_path / "ran.txt"
+        link.symlink_to(target)
+        config_path = _write_config(tmp_path, [_script_criterion("Edge", link / "verify.py")])
+        _commit_as_trusted(git_repo, config_path, link)
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1"])
+
+        assert rc == 2
+        assert not marker.exists()
+
+    def test_pinned_link_whose_text_leaves_the_repo_halts(self, git_repo, tmp_path):
+        outside = tmp_path.parent / f"{tmp_path.name}-outside"
+        outside.mkdir()
+        _write_marker_script(outside / "verify.py", tmp_path / "ran.txt")
+        self._pinned_criterion_halts(git_repo, tmp_path, tmp_path / "linked", f"../{outside.name}")
+
+    def test_pinned_link_with_absolute_text_halts(self, git_repo, tmp_path):
+        (tmp_path / "real").mkdir()
+        _write_marker_script(tmp_path / "real" / "verify.py", tmp_path / "ran.txt")
+        _git(git_repo, "add", "real/verify.py")
+        self._pinned_criterion_halts(
+            git_repo, tmp_path, tmp_path / "linked", str(tmp_path / "real")
+        )
+
+    def test_cycle_of_pinned_links_halts(self, git_repo, tmp_path):
+        (tmp_path / "b").symlink_to("a")
+        _git(git_repo, "add", "b")
+        self._pinned_criterion_halts(git_repo, tmp_path, tmp_path / "a", "b")
+
+    def test_subdirectory_project_root_does_not_borrow_a_deeper_pin(
+        self, git_repo, tmp_path, monkeypatch
+    ):
+        # Trusted ref pins sub/a/link only. A link at top-level a/link with the
+        # same text must not match it when the project root is sub/.
+        marker = tmp_path / "ran.txt"
+        for base in (tmp_path / "sub", tmp_path):
+            (base / "real").mkdir(parents=True, exist_ok=True)
+            _write_marker_script(base / "real" / "verify.py", marker)
+            (base / "a").mkdir(exist_ok=True)
+            (base / "a" / "link").symlink_to("../real", target_is_directory=True)
+        config_path = _write_config(
+            tmp_path, [_script_criterion("Sub", tmp_path / "a" / "link" / "verify.py")]
+        )
+        _git(git_repo, "add", "sub", "real/verify.py")
+        _commit_as_trusted(git_repo, config_path)
+        _git(git_repo, "add", "a/link")
+        _git(git_repo, "commit", "-q", "-m", "PR adds a top-level link")
+        monkeypatch.setattr(_dispatcher, "_PROJECT_ROOT", tmp_path / "sub")
+
+        assert _dispatcher._load_pinned_links("origin/main", tmp_path / "sub") is not None
+        monkeypatch.setattr(_dispatcher, "_PINNED_LINK_SOURCE", ("origin/main", tmp_path / "sub"))
+        monkeypatch.setattr(_dispatcher, "_PINNED_LINKS", None)
+        assert _dispatcher._pinned_link_text(tmp_path / "a" / "link", tmp_path) is None
+        assert _dispatcher._pinned_link_text(tmp_path / "sub" / "a" / "link", tmp_path) == "../real"
+        assert not marker.exists()

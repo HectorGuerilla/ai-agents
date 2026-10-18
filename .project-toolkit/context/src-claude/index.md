@@ -7,7 +7,7 @@
 [Where to look]
 || Path | Why | (see: .project-toolkit/context/src-claude/details/where-to-look.md)
 [Skip]
-|`.claude/agents/`, `.claude/rules/`, `.claude/skills/<name>/SKILL.md`, `.clau... (see: .project-toolkit/context/src-claude/details/skip.md)
+|`.claude/agents/`, shipped `.claude/skills/<name>`: symlinks here. `.claude/r... (see: .project-toolkit/context/src-claude/details/skip.md)
 [Constraints]
 |Cross-harness change: read `agent-harness-reference` first. In the ai-agents ... (see: .project-toolkit/context/src-claude/details/constraints.md)
 [Dangerous assumptions]

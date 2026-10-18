@@ -641,7 +641,7 @@ def _build_hooks(
 # before hooks so the manifest-walk-up bootstrap in shimmed hooks finds
 # .claude-plugin/plugin.json alongside lib/; the run-once block already
 # guarantees that ordering since it completes before the per-platform loop
-# starts. The skills generator copies .claude/skills/* first; rules write to
+# starts. The skills generator mirrors src/claude/skills/* first; rules write to
 # a separate dir (.github/instructions/); hooks write src/copilot-cli/hooks/.
 #
 # A `commands` step sat between skills and rules until ADR-064 made skills the
@@ -1208,7 +1208,6 @@ OWNED_PREFIXES: tuple[str, ...] = (
     "src/",
     ".github/instructions/",
     ".github/agents/",
-    ".claude/agents/",
     ".claude/rules/",
     ".claude/lib/",
     ".claude/hooks/",
@@ -1220,24 +1219,16 @@ OWNED_PREFIXES: tuple[str, ...] = (
 
 
 def _effective_owned_prefixes(repo_root: Path) -> tuple[str, ...]:
-    """Return :data:`OWNED_PREFIXES` widened with each skill's install target.
+    """Return :data:`OWNED_PREFIXES` widened with each repo-local skill's ``SKILL.md``.
 
-    ADR-109 B3: ``.claude/skills/<name>/SKILL.md`` is template-owned
-    (binplaced from ``src/claude/skills/<name>/SKILL.md``), but the rest of
-    each ``.claude/skills/<name>/`` directory (scripts, references, tests) is
-    hand-maintained. ``OWNED_PREFIXES`` cannot add the whole
-    ``.claude/skills/`` prefix the way it does for ``.claude/agents/`` and
-    ``.claude/rules/`` without also claiming those hand-maintained files as
-    staleness-checked and restore-eligible, so this widens the static tuple
-    with one file-level entry per discovered skill instead, read from
-    :func:`skill_templates.owned_targets` at call time (the same run-time
-    membership source ``build_all.assert_no_claude_writes`` already trusts).
-
-    :func:`skill_templates.owned_targets` also returns each skill's
-    ``src/claude/skills/<name>/SKILL.md`` plugin-tree path; those are dropped
-    here since ``OWNED_PREFIXES``'s blanket ``"src/"`` entry already covers
-    them, and a duplicate prefix would just cost the ``any(startswith)``
-    scans extra, redundant comparisons.
+    A repo-local skill renders ``.claude/skills/<name>/SKILL.md`` in place,
+    and the rest of its real directory is hand-maintained, so the whole
+    ``.claude/skills/`` prefix cannot be owned; this adds one file-level
+    entry per such skill, read from :func:`skill_templates.owned_targets`.
+    A shipped skill's ``.claude/skills/<name>`` is a symlink into
+    ``src/claude/skills/`` (ADR-119), which the blanket ``"src/"`` entry
+    already covers, so its ``owned_targets`` path is dropped here; the
+    ``--check`` snapshot also refuses a path behind a symlink.
     """
     install_root = repo_root / ".claude" / "skills"
     skill_paths = tuple(

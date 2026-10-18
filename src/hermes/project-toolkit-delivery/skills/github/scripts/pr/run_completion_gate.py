@@ -195,7 +195,7 @@ What is classified, and why:
     halts the gate until the change is approved. That is the posture to
     want for a file whose contents can wave a red check through. In an
     installed-plugin consumer it is not the same file. Each marketplace
-    maps ``project-toolkit`` to one root and only one, ``./.claude`` in
+    maps ``project-toolkit`` to one root and only one, ``./src/claude`` in
     ``.claude-plugin/marketplace.json`` and ``./src/copilot-cli`` in
     ``.github/plugin/marketplace.json``, and neither root contains the
     upstream ``.agents`` tree, so a consumer workspace has no such path
@@ -1407,6 +1407,116 @@ def _are_disjoint(first: Path, second: Path) -> bool:
     return not (_is_within(first, second) or _is_within(second, first))
 
 
+# Tracked symlinks the trusted ref vouches for, keyed by repo-relative POSIX
+# path, valued by link text (ADR-119). :func:`main` names the ref and work tree
+# in _PINNED_LINK_SOURCE before any path is classified; the table loads on the
+# first link component the gate meets, so a run that meets none costs no git
+# call. An empty table means every in-tree symlink is refused, which is the
+# behavior with no source and when the table cannot be read.
+_PINNED_LINK_SOURCE: tuple[str, Path] | None = None
+_PINNED_LINKS: tuple[Path, dict[str, str]] | None = None
+
+# A pinned link may point at another pinned link. Bounded so a cycle of pinned
+# links halts instead of spinning.
+_MAX_PINNED_LINK_HOPS = 8
+
+_GIT_SYMLINK_MODE = "120000"
+
+
+def _load_pinned_links(trust_anchor_ref: str, cwd: Path) -> tuple[Path, dict[str, str]] | None:
+    """The work-tree root and every symlink at ``trust_anchor_ref`` under it.
+
+    Returns ``(toplevel, {toplevel-relative path: link text})``. Paths come
+    from ``ls-tree --full-tree``, so they are relative to the git toplevel
+    whatever ``cwd`` is, and :func:`_pinned_link_text` resolves each link
+    against that same toplevel. Keying on ``cwd`` instead let a link at
+    ``a/link`` match the pinned ``sub/a/link`` when the project root was a
+    subdirectory.
+
+    Returns ``None`` (refuse every link) when the ref is malformed, is not a
+    remote-tracking ref, or git cannot list it. Only a ref the PR cannot move
+    may vouch for a link: a link the checked-out PR adds or retargets is
+    absent from this table or differs from it, and still halts.
+    """
+    if not _TRUSTED_REF_RE.match(trust_anchor_ref):
+        return None
+    if _require_remote_tracking_ref(trust_anchor_ref, cwd) is not None:
+        return None
+    try:
+        top = _run_git(["rev-parse", "--show-toplevel"], cwd)
+        if top.returncode != 0:
+            return None
+        toplevel = Path(_git_text(top.stdout).strip())
+        listing = _run_git(["ls-tree", "-r", "-z", "--full-tree", trust_anchor_ref], cwd)
+        if listing.returncode != 0:
+            return None
+        blobs: dict[str, str] = {}
+        for entry in _git_text(listing.stdout).split("\0"):
+            meta, _, path = entry.partition("\t")
+            fields = meta.split()
+            if len(fields) == 3 and fields[0] == _GIT_SYMLINK_MODE:
+                blobs[path] = fields[2]
+        links: dict[str, str] = {}
+        for path, sha in blobs.items():
+            blob = _run_git(["cat-file", "blob", sha], cwd)
+            if blob.returncode != 0:
+                return None
+            links[path] = _git_text(blob.stdout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return toplevel, links
+
+
+def _git_text(output: bytes | str) -> str:
+    """Decode captured git output; callers and test doubles pass bytes or text."""
+    return output.decode(errors="replace") if isinstance(output, bytes) else output
+
+
+def _pinned_links() -> tuple[Path, dict[str, str]] | None:
+    """The pinned-link table for this run, loaded on first use; ``None`` pins nothing."""
+    global _PINNED_LINKS
+    if _PINNED_LINKS is None and _PINNED_LINK_SOURCE is not None:
+        _PINNED_LINKS = _load_pinned_links(*_PINNED_LINK_SOURCE)
+    return _PINNED_LINKS
+
+
+def _pinned_link_text(link: Path, root: Path) -> str | None:
+    """The link's text when the trusted ref holds the identical link, else ``None``.
+
+    ``root`` bounds which links the caller inspects; the lookup key is the
+    link's path under the git toplevel the table was read from.
+    """
+    pinned = _pinned_links()
+    if pinned is None or not _is_within(link, root):
+        return None
+    toplevel, table = pinned
+    try:
+        # The parents were scanned as real directories, so resolving them
+        # only normalizes spelling (a symlinked /tmp, say); the link stays.
+        rel = (link.parent.resolve() / link.name).relative_to(toplevel.resolve()).as_posix()
+        text = os.readlink(link)
+    except (ValueError, OSError):
+        return None
+    if table.get(rel) != text or Path(text).is_absolute():
+        return None
+    return text
+
+
+def _first_link_component(candidate: Path, root: Path) -> Path | None:
+    """First symlinked component of ``candidate`` at or below ``root``, pinned or not."""
+    probe = Path(candidate.parts[0])
+    for part in candidate.parts[1:]:
+        probe = probe / part
+        if not _is_within(probe, root):
+            continue
+        try:
+            if probe.is_symlink():
+                return probe
+        except OSError:
+            return probe
+    return None
+
+
 def _first_symlinked_component(candidate: Path, root: Path) -> Path | None:
     """First symlinked component of ``candidate`` at or below ``root``.
 
@@ -1420,18 +1530,29 @@ def _first_symlinked_component(candidate: Path, root: Path) -> Path | None:
     ones PR content can create; a symlink above the root, such as a
     symlinked home directory, is the operator's own environment and must
     not false-halt the gate.
+
+    A link the trusted ref already holds, with identical link text
+    (:data:`_PINNED_LINKS`, ADR-119), is not PR-controlled: the base branch
+    vouches for the link blob, and the target file is still byte-compared
+    at the trusted ref. Such a link is followed, and the scan continues
+    over its target, so every component on the way to the file is either a
+    real directory or a pinned link. A pinned link whose target leaves
+    ``root``, or a chain longer than :data:`_MAX_PINNED_LINK_HOPS`, is
+    returned as the offending component.
     """
-    probe = Path(candidate.parts[0])
-    for part in candidate.parts[1:]:
-        probe = probe / part
-        if not _is_within(probe, root):
-            continue
-        try:
-            if probe.is_symlink():
-                return probe
-        except OSError:
-            return probe
-    return None
+    current = candidate
+    for _ in range(_MAX_PINNED_LINK_HOPS):
+        link = _first_link_component(current, root)
+        if link is None:
+            return None
+        text = _pinned_link_text(link, root)
+        if text is None:
+            return link
+        rest = current.parts[len(link.parts) :]
+        current = Path(os.path.normpath(link.parent / text), *rest)
+        if not _is_within(current, root):
+            return link
+    return candidate
 
 
 # The plugin-root form every shipped invocation uses. Expanding it is not
@@ -3505,6 +3626,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.pull_request <= 0:
         print("Pull request number must be positive.", file=sys.stderr)
         return 2
+
+    # Before any path is classified: the config path itself may cross a
+    # link the trusted ref vouches for (ADR-119).
+    global _PINNED_LINK_SOURCE, _PINNED_LINKS
+    _PINNED_LINK_SOURCE = (args.trust_anchor_ref, _PROJECT_ROOT)
+    _PINNED_LINKS = None
 
     resolved = _resolve_and_read_config(args.config)
     if resolved.path is None or resolved.raw is None:

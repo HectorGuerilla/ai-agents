@@ -180,9 +180,13 @@ def _binplace_findings(repo_root: Path, manifest: Manifest) -> list[Finding]:
             _install_hit(s, plugin) for s in _surfaces_at(manifest, install)
         ):
             findings.append(_unmanifested(source, install))
+        # A row whose source IS its plugin tree (ADR-119 lib-paths) is
+        # hand-maintained there, so an independent surface describes it.
+        accepted = {"generated", "mirrored", "translated"}
+        if row.source == row.plugin_tree:
+            accepted = accepted | {"independent"}
         if plugin is not None and not any(
-            s.relation in {"generated", "mirrored", "translated"}
-            for s in _surfaces_at(manifest, plugin)
+            s.relation in accepted for s in _surfaces_at(manifest, plugin)
         ):
             findings.append(_unmanifested(source, plugin))
     return findings
