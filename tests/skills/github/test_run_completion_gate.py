@@ -5216,6 +5216,85 @@ class TestPinnedLinkTrust:
         assert rc == 0
         assert marker.exists()
 
+    @staticmethod
+    def _package_verifier(tmp_path, marker, import_line):
+        script = tmp_path / "verify.py"
+        script.write_text(
+            "import json, os, pathlib, sys\n"
+            "sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib'))\n"
+            f"pathlib.Path({str(marker)!r}).write_text('ran')\n"
+            f"{import_line}\n"
+            "print(json.dumps({'ok': True}))\n",
+            encoding="utf-8",
+        )
+        return script
+
+    def _trusted_package(self, git_repo, tmp_path, script):
+        (tmp_path / "lib" / "pkg").mkdir(parents=True)
+        (tmp_path / "lib" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / "lib" / "pkg" / "api.py").write_text("VALUE = 1\n", encoding="utf-8")
+        config_path = _write_config(tmp_path, [_script_criterion("Pkg", script)])
+        _commit_as_trusted(
+            git_repo,
+            config_path,
+            script,
+            tmp_path / "lib" / "pkg" / "__init__.py",
+            tmp_path / "lib" / "pkg" / "api.py",
+        )
+        return config_path
+
+    def test_package_link_with_only_an_initializer_halts(self, git_repo, tmp_path):
+        # The marker line runs before the import, so the assertion is the exit
+        # code; the leaf api.py is missing and only __init__.py would run.
+        marker = tmp_path / "ran.txt"
+        script = self._package_verifier(tmp_path, marker, "from pkg.api import VALUE")
+        config_path = self._trusted_package(git_repo, tmp_path, script)
+        (tmp_path / "evil").mkdir()
+        (tmp_path / "evil" / "__init__.py").write_text("X = 2\n", encoding="utf-8")
+        _git(git_repo, "rm", "-q", "-r", "lib/pkg")
+        (tmp_path / "lib").mkdir(exist_ok=True)
+        (tmp_path / "lib" / "pkg").symlink_to("../evil", target_is_directory=True)
+        _git(git_repo, "add", "lib/pkg", "evil")
+        _git(git_repo, "commit", "-q", "-m", "PR swaps the package for a link")
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1"])
+
+        assert rc == 2
+        assert not marker.exists()
+
+    def test_edited_initializer_with_the_leaf_removed_halts(self, git_repo, tmp_path):
+        marker = tmp_path / "ran.txt"
+        script = self._package_verifier(tmp_path, marker, "from pkg.api import VALUE")
+        config_path = self._trusted_package(git_repo, tmp_path, script)
+        (tmp_path / "lib" / "pkg" / "__init__.py").write_text("X = 2\n", encoding="utf-8")
+        _git(git_repo, "rm", "-q", "lib/pkg/api.py")
+        _git(git_repo, "commit", "-q", "-am", "PR edits the initializer, drops the leaf")
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1"])
+
+        assert rc == 2
+        assert not marker.exists()
+
+    def test_literal_import_module_through_a_link_halts(self, git_repo, tmp_path):
+        marker = tmp_path / "ran.txt"
+        script = self._package_verifier(
+            tmp_path, marker, "import importlib; importlib.import_module('pkg.api')"
+        )
+        config_path = self._trusted_package(git_repo, tmp_path, script)
+        (tmp_path / "evil").mkdir()
+        (tmp_path / "evil" / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / "evil" / "api.py").write_text("VALUE = 2\n", encoding="utf-8")
+        _git(git_repo, "rm", "-q", "-r", "lib/pkg")
+        (tmp_path / "lib").mkdir(exist_ok=True)
+        (tmp_path / "lib" / "pkg").symlink_to("../evil", target_is_directory=True)
+        _git(git_repo, "add", "lib/pkg", "evil")
+        _git(git_repo, "commit", "-q", "-m", "PR swaps the package for a link")
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1"])
+
+        assert rc == 2
+        assert not marker.exists()
+
     def test_link_the_pr_adds_halts(self, git_repo, tmp_path):
         marker = tmp_path / "ran.txt"
         (tmp_path / "real").mkdir()

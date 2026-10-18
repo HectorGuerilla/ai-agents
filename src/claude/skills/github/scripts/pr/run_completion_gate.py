@@ -1919,11 +1919,13 @@ def _module_files(dotted: str, roots: list[Path], toplevel: Path) -> list[str]:
 
 
 def _module_files_in_root(dotted: str, root: Path, toplevel: Path) -> list[str]:
-    """:func:`_module_files` for one root: its initializers, then the module."""
+    """:func:`_module_files` for one root: its initializers, then the module.
+
+    An ancestor initializer runs even when the leaf module is missing (the
+    import fails after it), so it joins the closure either way.
+    """
     resolved = _resolve_module_root(dotted, [root], toplevel)
-    if resolved is None:
-        return []
-    root, module = resolved
+    module = None if resolved is None else resolved[1]
     parts = [part for part in dotted.split(".") if part]
     files: list[str] = []
     for depth in range(1, len(parts)):
@@ -1933,7 +1935,7 @@ def _module_files_in_root(dotted: str, root: Path, toplevel: Path) -> list[str]:
         if _first_symlinked_component(initializer, toplevel) is not None:
             continue
         files.append(initializer.relative_to(toplevel).as_posix())
-    if module not in files:
+    if module is not None and module not in files:
         files.append(module)
     return files
 
@@ -2532,16 +2534,23 @@ def _symlinked_import_sites(rel_paths: list[str], toplevel: Path) -> list[str]:
         except OSError:
             continue
         absolute_roots = _import_roots(script, toplevel)
-        for level, dotted in _imported_module_names(source):
+        imports = list(_imported_module_names(source))
+        # A literal dynamic load (importlib.import_module("x")) imports too.
+        imports.extend((0, load.module) for load in _dynamic_loads(source, script) if load.module)
+        for level, dotted in imports:
             roots = absolute_roots if level == 0 else _relative_import_root(script, level, toplevel)
             parts = [part for part in dotted.split(".") if part]
             if not parts:
                 continue
             for root in roots:
-                for candidate in (
-                    root.joinpath(*parts).with_suffix(".py"),
-                    root.joinpath(*parts, "__init__.py"),
-                ):
+                # Every dotted prefix: an ancestor package's __init__.py runs
+                # even when the leaf is missing.
+                candidates = [root.joinpath(*parts).with_suffix(".py")]
+                candidates.extend(
+                    root.joinpath(*parts[:depth], "__init__.py")
+                    for depth in range(1, len(parts) + 1)
+                )
+                for candidate in candidates:
                     if not _is_within(candidate, toplevel) or not candidate.is_file():
                         continue
                     link = _first_symlinked_component(candidate, toplevel)
