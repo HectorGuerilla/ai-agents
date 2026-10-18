@@ -3880,8 +3880,9 @@ class TestImportClosureBranches:
         tmp_path_factory,
     ):
         # A module reached through a symlink must not be silently
-        # verified at its target; _classify_argv_token fails those
-        # closed and the closure simply declines to follow one.
+        # verified at its target. The resolver declines to follow one;
+        # _symlinked_import_sites then fails the import closed, so the
+        # gate halts instead of running it unverified.
         outside = tmp_path_factory.mktemp("outside")
         target = outside / "real.py"
         target.write_text("", encoding="utf-8")
@@ -5163,6 +5164,57 @@ class TestPinnedLinkTrust:
 
         assert rc == 2
         assert not marker.exists(), "an edited module the verifier imports must not run"
+
+    @staticmethod
+    def _lib_importing_verifier(tmp_path, marker):
+        """``verify.py`` that imports ``mod`` from ``lib`` beside it, as the shipped ones do."""
+        script = tmp_path / "verify.py"
+        script.write_text(
+            "import json, os, pathlib, sys\n"
+            "sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib'))\n"
+            "import mod\n"
+            f"pathlib.Path({str(marker)!r}).write_text('ran')\n"
+            "print(json.dumps({'ok': True}))\n",
+            encoding="utf-8",
+        )
+        return script
+
+    def test_pr_that_swaps_a_lib_package_for_a_link_halts(self, git_repo, tmp_path):
+        # The resolver declines a module behind an unpinned link, so before the
+        # fail-closed pass the swapped-in module was never compared but still ran.
+        marker = tmp_path / "ran.txt"
+        script = self._lib_importing_verifier(tmp_path, marker)
+        (tmp_path / "lib").mkdir()
+        (tmp_path / "lib" / "mod.py").write_text("VALUE = 1\n", encoding="utf-8")
+        config_path = _write_config(tmp_path, [_script_criterion("Lib", script)])
+        _commit_as_trusted(git_repo, config_path, script, tmp_path / "lib" / "mod.py")
+        (tmp_path / "evil").mkdir()
+        (tmp_path / "evil" / "mod.py").write_text("VALUE = 2\n", encoding="utf-8")
+        _git(git_repo, "rm", "-q", "-r", "lib")
+        (tmp_path / "lib").symlink_to("evil", target_is_directory=True)
+        _git(git_repo, "add", "lib", "evil")
+        _git(git_repo, "commit", "-q", "-m", "PR swaps lib for a link")
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1"])
+
+        assert rc == 2
+        assert not marker.exists(), "a module behind an unpinned link must not run"
+
+    def test_lib_package_behind_a_pinned_link_dispatches(self, git_repo, tmp_path):
+        marker = tmp_path / "ran.txt"
+        script = self._lib_importing_verifier(tmp_path, marker)
+        (tmp_path / "real_lib").mkdir()
+        (tmp_path / "real_lib" / "mod.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (tmp_path / "lib").symlink_to("real_lib", target_is_directory=True)
+        config_path = _write_config(tmp_path, [_script_criterion("Pinned lib", script)])
+        _commit_as_trusted(
+            git_repo, config_path, script, tmp_path / "real_lib" / "mod.py", tmp_path / "lib"
+        )
+
+        rc = _dispatcher.main(["--config", str(config_path), "--pull-request", "1"])
+
+        assert rc == 0
+        assert marker.exists()
 
     def test_link_the_pr_adds_halts(self, git_repo, tmp_path):
         marker = tmp_path / "ran.txt"

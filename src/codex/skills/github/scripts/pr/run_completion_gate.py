@@ -2511,6 +2511,51 @@ def _unresolvable_dynamic_sites(rel_paths: list[str], toplevel: Path) -> list[st
     return sites
 
 
+def _symlinked_import_sites(rel_paths: list[str], toplevel: Path) -> list[str]:
+    """``path: message`` for every import in ``rel_paths`` that reaches an unpinned link.
+
+    :func:`_resolve_module_root` declines a candidate behind a symlink, so it
+    never joins the closure and is never byte-compared. The verifier still
+    imports it: ``sys.path`` follows the link. A pull request could replace a
+    package directory with a link to its own code and run it under a trusted
+    verdict (CWE-59, CWE-829). ADR-119 makes links routine, so such an import
+    fails closed here instead. A link the trusted ref pins is followed by
+    :func:`_first_symlinked_component` and is not reported.
+    """
+    sites: list[str] = []
+    for rel in rel_paths:
+        if not rel.endswith(".py"):
+            continue
+        script = toplevel / rel
+        try:
+            source = script.read_bytes()
+        except OSError:
+            continue
+        absolute_roots = _import_roots(script, toplevel)
+        for level, dotted in _imported_module_names(source):
+            roots = absolute_roots if level == 0 else _relative_import_root(script, level, toplevel)
+            parts = [part for part in dotted.split(".") if part]
+            if not parts:
+                continue
+            for root in roots:
+                for candidate in (
+                    root.joinpath(*parts).with_suffix(".py"),
+                    root.joinpath(*parts, "__init__.py"),
+                ):
+                    if not _is_within(candidate, toplevel) or not candidate.is_file():
+                        continue
+                    link = _first_symlinked_component(candidate, toplevel)
+                    if link is None:
+                        continue
+                    site = (
+                        f"{rel}: import {dotted} reaches unpinned symlink "
+                        f"{link.relative_to(toplevel).as_posix()}"
+                    )
+                    if site not in sites:
+                        sites.append(site)
+    return sites
+
+
 def _expand_import_closure(rel_paths: list[str], toplevel: Path) -> list[str]:
     """``rel_paths`` plus every work-tree module they transitively import.
 
@@ -2754,6 +2799,7 @@ def _verify_command_trust(
 
         untrusted = list(escaping) + nested
         untrusted.extend(_unresolvable_dynamic_sites(checked, toplevel))
+        untrusted.extend(_symlinked_import_sites(checked, toplevel))
         errors: list[str] = []
         for rel_path in checked:
             is_trusted, error = _verify_worktree_file_trust(
