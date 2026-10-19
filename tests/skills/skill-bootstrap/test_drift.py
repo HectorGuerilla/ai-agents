@@ -718,10 +718,19 @@ def test_command_timeout_kills_the_whole_process_group(capsys, repo, skills, mon
     assert code == 1
     assert "timed out" in only_check(payload)["detail"]
     grandchild = int(pid_file.read_text(encoding="utf-8"))
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and _alive(grandchild):
+    # Assert on the loop's own last probe. A second probe after the loop can see a
+    # zombie that init reaped in between and report the dead process as alive.
+    alive = True
+    deadline = time.monotonic() + 30  # exits on the first dead probe, so passing runs pay nothing
+    while time.monotonic() < deadline:
+        alive = _alive(grandchild)
+        if not alive:
+            break
         time.sleep(0.05)
-    assert not _alive(grandchild)
+    assert not alive, f"grandchild {grandchild} survived the group kill: {_describe(grandchild)}"
+
+
+PROC = Path("/proc")
 
 
 def _alive(pid: int) -> bool:
@@ -729,14 +738,52 @@ def _alive(pid: int) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    # A killed child that nobody reaped is a zombie; treat it as dead.
-    state = Path(f"/proc/{pid}/stat")
-    if not state.exists():
-        return True
+    if not PROC.is_dir():
+        return True  # no procfs (non-Linux POSIX): the signal probe is all we have
+    state = PROC / str(pid) / "stat"
     try:
+        # A killed child that nobody reaped is a zombie; treat it as dead.
         return state.read_text(encoding="utf-8").rsplit(")", 1)[1].split()[0] != "Z"
     except (ProcessLookupError, FileNotFoundError):
-        return False  # exited between the exists check and the read
+        return False  # reaped between os.kill and the read
+
+
+def _describe(pid: int) -> str:
+    try:
+        stat = (PROC / str(pid) / "stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+        return f"state={stat[0]} ppid={stat[1]} pgrp={stat[2]}"
+    except (OSError, IndexError):
+        return "no /proc entry"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="signal 0 probe is POSIX only")
+def test_alive_treats_a_pid_reaped_after_the_signal_probe_as_dead(monkeypatch, tmp_path):
+    # Regression for #6712: os.kill succeeds on the zombie, init reaps it, /proc entry vanishes.
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+    monkeypatch.setitem(globals(), "PROC", tmp_path)  # a procfs with no entry for the pid
+
+    assert _alive(2**22 + 1) is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="signal 0 probe is POSIX only")
+def test_alive_falls_back_to_the_signal_probe_without_procfs(monkeypatch, tmp_path):
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+    monkeypatch.setitem(globals(), "PROC", tmp_path / "missing")
+
+    assert _alive(2**22 + 1) is True
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs Linux procfs")
+def test_alive_is_true_for_this_process_and_false_for_a_zombie(tmp_path):
+    assert _alive(os.getpid()) is True
+    zombie = subprocess.Popen([PY, "-c", "pass"])
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and _alive(zombie.pid):
+        time.sleep(0.02)
+    try:
+        assert _alive(zombie.pid) is False  # exited, not yet waited on
+    finally:
+        zombie.wait()
 
 
 def test_skill_with_every_check_skipped_reports_skipped(capsys, repo, skills):
