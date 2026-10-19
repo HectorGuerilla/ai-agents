@@ -14,7 +14,8 @@ Safety (CWE-22 and CWE-59):
   already on disk is never trusted; its text must equal the computed target.
 - A plugin entry that is itself a symlink, or resolves outside the plugin
   tree, is refused (exit 2), so no install link chains through a top-level
-  plugin entry. Symlinks nested inside an entry are not checked here.
+  plugin entry. A symlink anywhere inside an entry is refused the same way
+  (exit 2, the path named), because the install link makes it reachable.
 - Only top-level names under ``install_tree`` are touched. A name in
   ``skip_names`` (a ``distribution: repo-local`` skill, which has no
   plugin-tree copy) is never linked, replaced, or reported.
@@ -39,7 +40,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -117,6 +118,19 @@ def link_row(
             )
             outcome.drifted.append(str(entry))
             outcome.exit_code = 2
+            _withdraw_link(install_tree / entry.name, check)
+            continue
+        nested = _first_symlink(entry)
+        if nested is not None:
+            # CWE-59: the install link exposes the whole entry, so a link
+            # nested inside it is reachable from the install tree.
+            print(
+                f"Error: plugin entry {entry} holds a symlink at {nested}; refusing to link it",
+                file=sys.stderr,
+            )
+            outcome.drifted.append(str(nested))
+            outcome.exit_code = 2
+            _withdraw_link(install_tree / entry.name, check)
             continue
         try:
             _link_one(entry, install_tree / entry.name, check=check, outcome=outcome)
@@ -130,6 +144,16 @@ def link_row(
             outcome.exit_code = 2
     _sweep_install_tree(plugin_tree, install_tree, entries, skip_names, check, outcome)
     return outcome
+
+
+def _withdraw_link(link_path: Path, check: bool) -> None:
+    """Unlink an install link left by an earlier run to an entry now refused.
+
+    CWE-59: the link would keep exposing the unsafe target. Only a symlink is
+    removed; a real file or directory at the path is never touched.
+    """
+    if not check and link_path.is_symlink():
+        link_path.unlink()
 
 
 def _link_one(source: Path, link_path: Path, *, check: bool, outcome: LinkOutcome) -> None:
@@ -215,12 +239,23 @@ def trees_match(candidate: Path, source: Path) -> bool:
     return all(left[rel].read_bytes() == right[rel].read_bytes() for rel in left)
 
 
-def _tree_files(root: Path) -> dict[Path, Path] | None:
-    files: dict[Path, Path] = {}
+def _tree_paths(root: Path) -> Iterator[tuple[Path, Path]]:
+    """Yield ``(relative, absolute)`` for every path under ``root``, minus bytecode."""
     for path in root.rglob("*"):
         rel = path.relative_to(root)
         if "__pycache__" in rel.parts or path.suffix in (".pyc", ".pyo"):
             continue
+        yield rel, path
+
+
+def _first_symlink(root: Path) -> Path | None:
+    """Return the first symlink under ``root``, or None when the tree is clean."""
+    return next((path for _, path in _tree_paths(root) if path.is_symlink()), None)
+
+
+def _tree_files(root: Path) -> dict[Path, Path] | None:
+    files: dict[Path, Path] = {}
+    for rel, path in _tree_paths(root):
         if path.is_symlink():
             return None
         if path.is_file():
