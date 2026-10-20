@@ -61,6 +61,7 @@ _SHA_RE = re.compile(r"\b([0-9a-f]{7,40})\b", re.IGNORECASE)
 # Actions run IDs are decimal. A digits-only token after "run", "run ID", or
 # "runs/" (as in actions/runs/<id>) is a run ID, not a commit.
 _RUN_ID_RE = re.compile(r"\bruns?(?:[ \t]+id)?[ \t/#:=(\[\"'`-]{0,4}(\d+)\b", re.IGNORECASE)
+_RUN_URL_RE = re.compile(r"/actions/runs/\d+", re.IGNORECASE)
 # Run IDs are 9 to 11 digits today. Shorter digits-only tokens stay candidates,
 # since about 4% of 7-character abbreviated SHAs are all digits.
 _MIN_BARE_RUN_ID_DIGITS = 10
@@ -219,7 +220,10 @@ def _inline_text(token: Token) -> str:
         elif child.type in ("softbreak", "hardbreak"):
             parts.append("\n")
         elif child.type == "link_open":
-            parts.append(f" {_commit_refs(str(child.attrs.get('href', '')))} ")
+            href = str(child.attrs.get("href", ""))
+            # A link to an Actions run makes its label a run ID, whatever the label says.
+            run_context = " run " if _RUN_URL_RE.search(href) else ""
+            parts.append(f" {_commit_refs(href)} {run_context}")
         elif child.type == "html_inline" and child.content.startswith("<!--"):
             parts.append(" " if _is_gfm_comment(child.content) else child.content)
         elif child.type == "html_inline":

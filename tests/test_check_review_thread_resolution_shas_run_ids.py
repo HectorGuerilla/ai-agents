@@ -103,3 +103,17 @@ def test_resolved_thread_citing_run_ids_passes_report() -> None:
     assert report["sha_reference_count"] == 1
     assert report["invalid_count"] == 0
     assert report["reachable_count"] == 1
+
+
+def test_label_of_actions_run_link_is_not_a_sha() -> None:
+    body = "See [123456789](https://github.com/o/r/actions/runs/123456789) for logs."
+    assert _mod.extract_shas(body) == []
+
+
+def test_label_of_commit_link_is_still_checked() -> None:
+    body = "See [1234567](https://github.com/o/r/commit/1234567abcdef) for the fix."
+    assert _mod.extract_shas(body) == ["1234567abcdef", "1234567"]
+
+
+def test_label_of_other_link_is_still_checked() -> None:
+    assert _mod.extract_shas("See [1234567](https://example.com/page).") == ["1234567"]
