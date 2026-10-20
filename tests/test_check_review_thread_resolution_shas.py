@@ -529,6 +529,15 @@ def test_run_keyword_forms_mark_run_ids() -> None:
         assert extract_shas(text) == [], text
 
 
+def test_run_id_after_punctuation_is_not_a_sha() -> None:
+    for text in ("run (123456789) passed", "run `1234567`", "run=1234567", 'run "1234567"'):
+        assert extract_shas(text) == [], text
+
+
+def test_sentence_break_after_run_is_not_run_context() -> None:
+    assert extract_shas("It was a run. 1234567 fixed it") == ["1234567"]
+
+
 def test_short_digit_sha_without_run_context_is_checked() -> None:
     assert extract_shas("Fixed in 1234567") == ["1234567"]
 
