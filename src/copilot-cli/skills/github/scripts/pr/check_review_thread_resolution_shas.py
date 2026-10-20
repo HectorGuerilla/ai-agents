@@ -58,6 +58,12 @@ TEXT_MODE_PARSED = "parsed"
 TEXT_MODE_RAW_PARSER_MISSING = "raw-parser-missing"
 TEXT_MODE_RAW_NESTING_LIMIT = "raw-nesting-limit"
 _SHA_RE = re.compile(r"\b([0-9a-f]{7,40})\b", re.IGNORECASE)
+# Actions run IDs are decimal. A digits-only token after "run", "run ID", or
+# "runs/" (as in actions/runs/<id>) is a run ID, not a commit.
+_RUN_ID_RE = re.compile(r"\bruns?(?:\s+id)?\s*[/#:]?\s*#?(\d+)\b", re.IGNORECASE)
+# Run IDs are 9 to 11 digits today. Shorter digits-only tokens stay candidates,
+# since about 4% of 7-character abbreviated SHAs are all digits.
+_MIN_BARE_RUN_ID_DIGITS = 10
 _COMMIT_URL_RE = re.compile(r"/commits?/([0-9a-f]{7,40})\b", re.IGNORECASE)
 
 _THREADS_QUERY = """\
@@ -249,11 +255,23 @@ def _visible_text(body: str) -> tuple[str, str]:
     return "\n".join(parts), TEXT_MODE_PARSED
 
 
+def _is_run_id(match: re.Match[str], run_ids: set[int]) -> bool:
+    token = match.group(1)
+    if not token.isdigit():
+        return False
+    return match.start(1) in run_ids or len(token) >= _MIN_BARE_RUN_ID_DIGITS
+
+
 def scan_comment(body: str) -> tuple[list[str], str]:
     """Return the SHAs a comment shows and the text mode that found them."""
     visible, text_mode = _visible_text(body)
     # A link and its definition name the same commit; check each SHA once.
-    shas = dict.fromkeys(match.group(1).lower() for match in _SHA_RE.finditer(visible))
+    run_ids = {match.start(1) for match in _RUN_ID_RE.finditer(visible)}
+    shas = dict.fromkeys(
+        match.group(1).lower()
+        for match in _SHA_RE.finditer(visible)
+        if not _is_run_id(match, run_ids)
+    )
     return list(shas), text_mode
 
 
