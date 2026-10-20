@@ -434,3 +434,4 @@ def test_governance_quality_gate_table_matches_the_retired_self_verification_gat
     gates = _section(text, "SkillForge Quality Gates")
     assert "| Fast-fail and independent check |" in gates
     assert not re.search(r"self[-_ ]?verif", gates, re.I)
+    assert re.search(r"^Refs: #6688 ", gates, re.M), "changed gate needs an evidence anchor"
