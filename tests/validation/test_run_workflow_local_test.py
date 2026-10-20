@@ -2372,6 +2372,68 @@ def test_failure_detail_ignores_a_bare_error_label_in_the_omitted_head() -> None
     assert "[first exception" not in w._with_cause_hints(combined)
 
 
+_PARAMETRIZE_NODE_ID = (
+    "tests/skills/skillforge/test_triage_skill_request_followup_6676.py::"
+    "test_split_error_class_names[TypeError: Cannot read property-Type Error: Cannot read property]"
+)
+
+
+def test_failure_detail_ignores_a_pytest_node_id_whose_params_spell_an_exception() -> None:
+    # Issue #6795: a passing test's parametrize id named TypeError and was shown
+    # as the first exception, while the real cause was a stage timeout.
+    combined = f"{_PARAMETRIZE_NODE_ID} PASSED\n" + ("noise\n" * 2000) + "TimeoutExpired"
+
+    assert "[first exception" not in w._with_cause_hints(combined)
+
+
+def test_failure_detail_skips_the_node_id_and_reports_the_real_traceback_line() -> None:
+    combined = (
+        f"[gw3] [ 42%] PASSED {_PARAMETRIZE_NODE_ID}\n"
+        f"[Pytest/pytest (split-2)]   | {_PARAMETRIZE_NODE_ID} PASSED\n"
+        "E   RuntimeError: the real failure\n" + ("noise\n" * 2000) + "0/9 passed"
+    )
+
+    detail = w._with_cause_hints(combined)
+
+    assert "[first exception in the omitted output] E   RuntimeError: the real failure" in detail
+    assert "Cannot read property" not in detail.split("\n")[1]
+
+
+def test_failure_detail_reports_the_exception_of_a_pytest_short_summary_line() -> None:
+    # Edge: a short-summary line pairs a node id with the real exception.
+    combined = "FAILED tests/test_a.py::test_x[a b] - ValueError: boom\n" + ("noise\n" * 2000)
+
+    detail = w._with_cause_hints(combined)
+
+    assert "[first exception in the omitted output] ValueError: boom" in detail
+
+
+def test_failure_detail_reports_a_short_summary_exception_behind_a_long_node_id() -> None:
+    # Edge: a long id must not push the exception out of the capped excerpt.
+    node_id = "tests/test_a.py::test_x[" + ("p" * 600) + "]"
+    combined = f"[Pytest/x]   | ERROR {node_id} - OSError: disk full\n" + ("noise\n" * 2000)
+
+    detail = w._with_cause_hints(combined)
+
+    assert "[first exception in the omitted output] OSError: disk full" in detail
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "tests/test_a.py::test_x[TypeError: boom]",
+        "tests/test_a.py::TestK::test_x[ValueError: a-b: c]",
+        "tests/test_a.py::test_x[a] b TypeError: boom] PASSED",
+        "PASSED tests/test_a.py::test_x[x] y: TypeError: z] ",
+        "scripts/y.py::test_z[Exception: x] PASSED",
+        "FAILED tests/test_a.py::test_x[TypeError: boom]",
+        "FAILED tests/test_a.py::test_x[a - b]-TypeError: boom",
+    ],
+)
+def test_omitted_exception_hint_ignores_a_node_id_line_without_a_summary_exception(line) -> None:
+    assert w._omitted_exception_hint(f"{line}\nnoise") is None
+
+
 def test_failure_detail_caps_a_long_omitted_exception_line() -> None:
     # Edge: a very long line must not push the real tail out of view.
     combined = "ValueError: " + ("x" * 5000) + "\n" + ("noise\n" * 2000) + "tail"
