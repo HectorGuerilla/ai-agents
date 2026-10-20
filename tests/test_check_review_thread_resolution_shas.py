@@ -530,7 +530,14 @@ def test_run_keyword_forms_mark_run_ids() -> None:
 
 
 def test_run_id_after_punctuation_is_not_a_sha() -> None:
-    for text in ("run (123456789) passed", "run `1234567`", "run=1234567", 'run "1234567"'):
+    for text in (
+        "run (123456789) passed",
+        "run `1234567`",
+        "run=1234567",
+        "run - 123456789",
+        "run-1234567",
+        'run "1234567"',
+    ):
         assert extract_shas(text) == [], text
 
 

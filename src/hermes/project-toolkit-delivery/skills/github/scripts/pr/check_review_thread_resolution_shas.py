@@ -60,7 +60,7 @@ TEXT_MODE_RAW_NESTING_LIMIT = "raw-nesting-limit"
 _SHA_RE = re.compile(r"\b([0-9a-f]{7,40})\b", re.IGNORECASE)
 # Actions run IDs are decimal. A digits-only token after "run", "run ID", or
 # "runs/" (as in actions/runs/<id>) is a run ID, not a commit.
-_RUN_ID_RE = re.compile(r"\bruns?(?:[ \t]+id)?[ \t/#:=(\[\"'`]{0,4}(\d+)\b", re.IGNORECASE)
+_RUN_ID_RE = re.compile(r"\bruns?(?:[ \t]+id)?[ \t/#:=(\[\"'`-]{0,4}(\d+)\b", re.IGNORECASE)
 # Run IDs are 9 to 11 digits today. Shorter digits-only tokens stay candidates,
 # since about 4% of 7-character abbreviated SHAs are all digits.
 _MIN_BARE_RUN_ID_DIGITS = 10
