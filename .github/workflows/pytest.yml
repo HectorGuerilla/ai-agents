@@ -140,7 +140,6 @@ jobs:
         uses: ./.github/actions/setup-code-env
         with:
           gh-token: ${{ secrets.GITHUB_TOKEN }}
-          enable-pester: false
           enable-git-hooks: false
 
       - name: Check for zero-collection test files (blocking)
@@ -180,7 +179,6 @@ jobs:
         uses: ./.github/actions/setup-code-env
         with:
           gh-token: ${{ secrets.GITHUB_TOKEN }}
-          enable-pester: false
           enable-git-hooks: false
 
       - name: Check index line endings (blocking)
@@ -247,7 +245,6 @@ jobs:
         uses: ./.github/actions/setup-code-env
         with:
           gh-token: ${{ secrets.GITHUB_TOKEN }}
-          enable-pester: false
           enable-git-hooks: false
 
       # No --depth=1: count_ratchet.py reads a merge base, and a depth-limited
@@ -303,7 +300,6 @@ jobs:
         uses: ./.github/actions/setup-code-env
         with:
           gh-token: ${{ secrets.GITHUB_TOKEN }}
-          enable-pester: false
           enable-git-hooks: false
 
       - name: Run mutation harnesses (blocking)
@@ -383,7 +379,6 @@ jobs:
         uses: ./.github/actions/setup-code-env
         with:
           gh-token: ${{ secrets.GITHUB_TOKEN }}
-          enable-pester: false
           enable-git-hooks: false
 
       # Issue #2655: blocking parse gate. PR #2640 shipped PEP 758 syntax
@@ -581,7 +576,6 @@ jobs:
         uses: ./.github/actions/setup-code-env
         with:
           gh-token: ${{ secrets.GITHUB_TOKEN }}
-          enable-pester: false
           enable-git-hooks: false
 
       - name: Download partition artifacts
@@ -759,7 +753,6 @@ jobs:
         uses: ./.github/actions/setup-code-env
         with:
           gh-token: ${{ secrets.GITHUB_TOKEN }}
-          enable-pester: false
           enable-git-hooks: false
 
       - name: Download partition artifacts
@@ -923,7 +916,6 @@ jobs:
         uses: ./.github/actions/setup-code-env
         with:
           gh-token: ${{ secrets.GITHUB_TOKEN }}
-          enable-pester: false
           enable-git-hooks: false
 
       - name: Compute seed artifact name
@@ -1051,7 +1043,6 @@ jobs:
         uses: ./.github/actions/setup-code-env
         with:
           gh-token: ${{ secrets.GITHUB_TOKEN }}
-          enable-pester: false
           enable-git-hooks: false
 
       - name: Run pip-audit
