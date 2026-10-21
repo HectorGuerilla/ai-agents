@@ -7,6 +7,7 @@ external commands (actionlint, gh act, docker) are mocked; no Docker required.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -2143,6 +2144,96 @@ def test_act_full_artifact_defect_still_fails(monkeypatch, tmp_path):
     assert res.ok is False
 
 
+# --- act workflow-run lookup 404 (#6803) --------------------------------
+
+# The verbatim tail of a real local act run of the pytest.yml security job
+# (2026-10-20). upload-sarif fails first with a 404 on the run lookup, then
+# upload-artifact fails on the artifact server limitation explained above.
+_RUN_LOOKUP_404 = (
+    "[Python Tests/Python Security Checks]   \u2757  ::error::Not Found - "
+    "https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run"
+)
+_SARIF_THEN_ARTIFACT_FAILURE = (
+    "[Python Tests/Python Security Checks]   \U0001f6a7  ::warning::Failed to gather "
+    "information for telemetry: Not Found - "
+    "https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run. "
+    "Will skip sending status report.\n"
+    f"{_RUN_LOOKUP_404}\n"
+    "[Python Tests/Python Security Checks]   \u274c  Failure - Main Upload Bandit SARIF\n"
+    "[Python Tests/Python Security Checks]   \u2757  ::error::Failed to CreateArtifact: "
+    "Failed to make request after 5 attempts: Unexpected end of JSON input\n"
+    "[Python Tests/Python Security Checks]   \u274c  Failure - Main Upload Bandit results\n"
+    "Error: Job 'Python Security Checks' failed"
+)
+
+
+def test_run_lookup_404_alone_is_an_act_limitation() -> None:
+    assert w._act_limitation_hint(_RUN_LOOKUP_404) is not None
+
+
+def test_sarif_404_followed_by_artifact_failure_downgrades() -> None:
+    # The real run: before #6803 the 404 line was an unexplained annotation and
+    # vetoed the downgrade, so the stage was a hard FAIL.
+    assert w._act_limitation_hint(_SARIF_THEN_ARTIFACT_FAILURE) is not None
+
+
+def test_run_lookup_404_downgrades_regardless_of_event() -> None:
+    for event in (None, "push", "workflow_dispatch", "pull_request", "schedule"):
+        assert w._act_limitation_hint(_SARIF_THEN_ARTIFACT_FAILURE, event) is not None
+
+
+def test_run_lookup_404_warning_alone_does_not_match() -> None:
+    # Negative: the telemetry ``::warning::`` carries the same text and is not
+    # evidence that the run failed for this reason.
+    text = (
+        "[x]   ::warning::Failed to gather information for telemetry: Not Found - "
+        "https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run. "
+        "Will skip sending status report.\n::error::boom"
+    )
+    assert w._act_limitation_hint(text) is None
+
+
+def test_404_from_another_endpoint_still_blocks() -> None:
+    # Negative control: a 404 on any other REST endpoint is a real defect.
+    text = "::error::Not Found - https://docs.github.com/rest/repos/repos#get-a-repository"
+    assert w._act_limitation_hint(text) is None
+
+
+def test_run_lookup_404_does_not_excuse_a_real_failure() -> None:
+    # Edge: an unrelated annotation next to the 404 keeps blocking.
+    combined = _SARIF_THEN_ARTIFACT_FAILURE + "\n[x]   ::error::bandit exited 1"
+    assert w._act_limitation_hint(combined) is None
+
+
+def test_act_full_sarif_run_lookup_404_warns(monkeypatch, tmp_path):
+    # Integration: the full act stage downgrades to a passing WARN. This is the
+    # #6803 symptom that blocked PR #6479.
+    wf = _write_wf(tmp_path, "name: x\non: workflow_dispatch\njobs: {}\n")
+    monkeypatch.setattr(
+        w,
+        "_run",
+        lambda cmd, *, timeout, cwd=None, env=None: (1, _SARIF_THEN_ARTIFACT_FAILURE, ""),
+    )
+    res = w._act_full_stage([wf.name], tmp_path)
+    assert res.ok is True
+    assert "[WARN]" in res.detail
+
+
+def test_act_full_other_404_still_fails(monkeypatch, tmp_path):
+    wf = _write_wf(tmp_path, "name: x\non: workflow_dispatch\njobs: {}\n")
+    monkeypatch.setattr(
+        w,
+        "_run",
+        lambda cmd, *, timeout, cwd=None, env=None: (
+            1,
+            "::error::Not Found - https://docs.github.com/rest/repos/repos#get-a-repository",
+            "",
+        ),
+    )
+    res = w._act_full_stage([wf.name], tmp_path)
+    assert res.ok is False
+
+
 # ---------------------------------------------------------------------------
 # No-repo-context limitation (gh API calls in act containers - issue #3981)
 # ---------------------------------------------------------------------------
@@ -2277,6 +2368,245 @@ def test_timeout_hint_does_not_blame_the_cache_without_clone_activity() -> None:
     assert "git clone" not in hint
 
 
+_SCOPE = "[Python Tests/pytest (split-2)]"
+_CLONE_BURST = "\n".join(f"{_CLONE_LINE} # ref=v{n}" for n in range(30))
+
+
+def _step_log(*lines: str) -> str:
+    return "\n".join(lines)
+
+
+def test_timeout_hint_names_the_running_step_not_the_cache() -> None:
+    # Issue #6793: 30 clone lines from the first minute, then pytest running.
+    # The old hint counted the clones and blamed a cold cache.
+    combined = _step_log(
+        _CLONE_BURST,
+        f"{_SCOPE} \u2b50 Run Set up job",
+        f"{_SCOPE}   \u2705  Success - Set up job",
+        f"{_SCOPE} \u2b50 Run Main Run pytest",
+        "TimeoutExpired: Command '['gh', 'act']' timed out after 600 seconds",
+    )
+
+    hint = w._stage_timeout_hint(combined)
+
+    assert hint is not None
+    assert "step 'Run pytest'" in hint
+    assert _SCOPE in hint
+    assert "still running when the 600s stage timeout fired" in hint
+    assert "cold gh act action cache is not the cause" in hint
+    assert "'git clone'" not in hint
+    assert "Re-run" not in hint
+
+
+def test_timeout_hint_names_the_step_and_elapsed_time_of_a_failed_step() -> None:
+    # Issue #6793 evidence: ``Failure - Main Run pytest [9m30s]`` before the kill.
+    combined = _step_log(
+        _CLONE_BURST,
+        f"{_SCOPE} \u2b50 Run Main Run pytest",
+        f"{_SCOPE}   \u274c  Failure - Main Run pytest [9m30s]",
+        "TimeoutExpired: Command '['gh', 'act']' timed out after 600 seconds",
+    )
+
+    hint = w._stage_timeout_hint(combined)
+
+    assert hint is not None
+    assert "step 'Run pytest'" in hint
+    assert "failed after 9m30s" in hint
+    assert "cold gh act action cache is not the cause" in hint
+
+
+def test_timeout_hint_picks_the_last_unfinished_step() -> None:
+    # Edge: finished steps are skipped; the step with no end line is the one cut.
+    combined = _step_log(
+        f"{_SCOPE} \u2b50 Run Main actions/checkout@abc",
+        f"{_SCOPE}   \u2705  Success - Main actions/checkout@abc [5s]",
+        f"{_SCOPE} \u2b50 Run Main Install dependencies",
+        f"{_SCOPE}   \u2705  Success - Main Install dependencies [40s]",
+        f"{_SCOPE} \u2b50 Run Main Run pytest",
+        "TimeoutExpired: timed out after 600 seconds",
+    )
+
+    hint = w._stage_timeout_hint(combined)
+
+    assert hint is not None
+    assert "step 'Run pytest'" in hint
+    assert "Install dependencies" not in hint
+
+
+def test_timeout_hint_after_a_finished_step_says_so() -> None:
+    # Edge: the kill landed between steps, so no step was cut mid-run.
+    combined = _step_log(
+        f"{_SCOPE} \u2b50 Run Main Install dependencies",
+        f"{_SCOPE}   \u2705  Success - Main Install dependencies [40s]",
+        "TimeoutExpired: timed out after 600 seconds",
+    )
+
+    hint = w._stage_timeout_hint(combined)
+
+    assert hint is not None
+    assert "step 'Install dependencies'" in hint
+    assert "had finished in 40s" in hint
+    assert "still running" not in hint
+
+
+def test_timeout_hint_keeps_the_cold_cache_text_when_no_step_started() -> None:
+    # Positive: clones plus setup-only lines (``Set up job``, ``Run Pre``) are
+    # the real cold-cache shape. No ``Run Main`` line means setup was not over.
+    combined = _step_log(
+        _CLONE_BURST,
+        f"{_SCOPE} \u2b50 Run Set up job",
+        f"{_SCOPE} \u2b50 Run Pre Harden Runner",
+        "TimeoutExpired: timed out after 600 seconds",
+    )
+
+    hint = w._stage_timeout_hint(combined)
+
+    assert hint is not None
+    assert "30 'git clone' line(s)" in hint
+    assert "no job step had started" in hint
+    assert "Re-run" in hint
+
+
+def test_timeout_hint_ignores_run_main_text_that_is_not_an_act_step_line() -> None:
+    # Negative: a test log that mentions the phrase must not count as a step.
+    combined = _step_log(
+        f"{_CLONE_LINE}",
+        "some output: Run Main thing",
+        "TimeoutExpired: timed out after 600 seconds",
+    )
+
+    hint = w._stage_timeout_hint(combined)
+
+    assert hint is not None
+    assert "1 'git clone' line(s)" in hint
+
+
+def test_timeout_step_hint_is_none_before_any_step() -> None:
+    assert w._timeout_step_hint("[x] \u2b50 Run Set up job\nTimeoutExpired") is None
+
+
+def test_timeout_step_hint_omits_the_limit_when_the_marker_has_no_seconds() -> None:
+    hint = w._timeout_step_hint(f"{_SCOPE} \u2b50 Run Main Run pytest\nTimeoutExpired")
+
+    assert hint is not None
+    assert "which was still running. " in hint
+    assert " when the " not in hint
+
+
+def test_timeout_step_hint_restarted_step_is_unfinished() -> None:
+    # Edge: a step that failed, then ran again, is judged by its latest run.
+    combined = _step_log(
+        f"{_SCOPE} \u2b50 Run Main Run pytest",
+        f"{_SCOPE}   \u274c  Failure - Main Run pytest [1s]",
+        f"{_SCOPE} \u2b50 Run Main Run pytest",
+    )
+
+    hint = w._timeout_step_hint(combined)
+
+    assert hint is not None
+    assert "still running" in hint
+
+
+def test_timeout_step_hint_skips_a_failed_step_the_job_moved_past() -> None:
+    # Devin review on #6806: a job that continues after a failed step (always(),
+    # continue-on-error) finished that step. The kill cut a later one.
+    combined = _step_log(
+        f"{_SCOPE} \u2b50 Run Main Lint",
+        f"{_SCOPE}   \u274c  Failure - Main Lint [1s]",
+        f"{_SCOPE} \u2b50 Run Main Cleanup",
+        f"{_SCOPE}   \u2705  Success - Main Cleanup [2s]",
+        "TimeoutExpired: timed out after 600 seconds",
+    )
+
+    hint = w._timeout_step_hint(combined)
+
+    assert hint is not None
+    assert "step 'Cleanup'" in hint
+    assert "Lint" not in hint
+
+
+def test_timeout_step_hint_names_a_later_running_step_over_an_earlier_failure() -> None:
+    combined = _step_log(
+        f"{_SCOPE} \u2b50 Run Main Lint",
+        f"{_SCOPE}   \u274c  Failure - Main Lint [1s]",
+        f"{_SCOPE} \u2b50 Run Main Run pytest",
+    )
+
+    hint = w._timeout_step_hint(combined)
+
+    assert hint is not None
+    assert "step 'Run pytest'" in hint
+    assert "still running" in hint
+
+
+def test_timeout_step_hint_judges_each_job_by_its_own_last_step() -> None:
+    # Edge: parallel jobs interleave. A step that is last in its own job counts
+    # even when another job started a step after it.
+    other = "[Python Tests/pytest (split-4)]"
+    combined = _step_log(
+        f"{_SCOPE} \u2b50 Run Main Run pytest",
+        f"{_SCOPE}   \u274c  Failure - Main Run pytest [9m30s]",
+        f"{other} \u2b50 Run Main Install dependencies",
+        f"{other}   \u2705  Success - Main Install dependencies [3s]",
+    )
+
+    hint = w._timeout_step_hint(combined)
+
+    assert hint is not None
+    assert "step 'Run pytest'" in hint
+    assert "9m30s" in hint
+
+
+def test_default_text_report_shows_the_timeout_step_after_a_chatty_step() -> None:
+    # Devin review on #6806: the text report prints the first 40 detail lines.
+    # 80 short lines from the step must not push the timeout cause out of view.
+    combined = _step_log(
+        f"{_SCOPE} \u2b50 Run Main Run tests",
+        *("testing" for _ in range(80)),
+        "TimeoutExpired: timed out after 600 seconds",
+    )
+    report = w.Report(1, [w.StageResult("gh act (full)", False, w._with_cause_hints(combined))])
+
+    text = w._format_text(report)
+
+    assert "step 'Run tests'" in text
+    assert "stage timeout fired" in text
+
+
+def test_timeout_step_hint_survives_the_detail_truncation() -> None:
+    # The cap keeps the tail; the step lines sit in the dropped head.
+    combined = (
+        f"{_SCOPE} \u2b50 Run Main Run pytest\n"
+        + ("noise\n" * 2000)
+        + "TimeoutExpired: timed out after 600 seconds"
+    )
+
+    detail = w._with_cause_hints(combined)
+
+    assert "step 'Run pytest'" in detail
+
+
+def test_act_full_timeout_during_a_test_step_names_the_step(monkeypatch, tmp_path):
+    # Integration: the #6793 symptom. The stage still blocks, and the operator
+    # reads the step, not a cold-cache remedy.
+    wf = _write_wf(tmp_path, "name: x\non: workflow_dispatch\njobs: {}\n")
+    monkeypatch.setattr(
+        w,
+        "_run",
+        lambda cmd, *, timeout, cwd=None, env=None: (
+            -1,
+            _step_log(_CLONE_BURST, f"{_SCOPE} \u2b50 Run Main Run pytest") + "\n",
+            "TimeoutExpired: Command '['gh', 'act']' timed out after 600 seconds",
+        ),
+    )
+
+    res = w._act_full_stage([wf.name], tmp_path)
+
+    assert res.ok is False
+    assert "step 'Run pytest'" in res.detail
+    assert "Re-run" not in res.detail
+
+
 def test_timeout_hint_is_absent_without_a_timeout() -> None:
     # Negative: an ordinary nonzero exit gets no timeout cause line, even when
     # the output happens to carry clone activity.
@@ -2369,6 +2699,68 @@ def test_failure_detail_ignores_a_bare_error_label_in_the_omitted_head() -> None
     combined = "Error: Job 'x' failed\n" + ("noise\n" * 2000) + "tail"
 
     assert "[first exception" not in w._with_cause_hints(combined)
+
+
+_PARAMETRIZE_NODE_ID = (
+    "tests/skills/skillforge/test_triage_skill_request_followup_6676.py::"
+    "test_split_error_class_names[TypeError: Cannot read property-Type Error: Cannot read property]"
+)
+
+
+def test_failure_detail_ignores_a_pytest_node_id_whose_params_spell_an_exception() -> None:
+    # Issue #6795: a passing test's parametrize id named TypeError and was shown
+    # as the first exception, while the real cause was a stage timeout.
+    combined = f"{_PARAMETRIZE_NODE_ID} PASSED\n" + ("noise\n" * 2000) + "TimeoutExpired"
+
+    assert "[first exception" not in w._with_cause_hints(combined)
+
+
+def test_failure_detail_skips_the_node_id_and_reports_the_real_traceback_line() -> None:
+    combined = (
+        f"[gw3] [ 42%] PASSED {_PARAMETRIZE_NODE_ID}\n"
+        f"[Pytest/pytest (split-2)]   | {_PARAMETRIZE_NODE_ID} PASSED\n"
+        "E   RuntimeError: the real failure\n" + ("noise\n" * 2000) + "0/9 passed"
+    )
+
+    detail = w._with_cause_hints(combined)
+
+    assert "[first exception in the omitted output] E   RuntimeError: the real failure" in detail
+    assert "Cannot read property" not in detail.split("\n")[1]
+
+
+def test_failure_detail_reports_the_exception_of_a_pytest_short_summary_line() -> None:
+    # Edge: a short-summary line pairs a node id with the real exception.
+    combined = "FAILED tests/test_a.py::test_x[a b] - ValueError: boom\n" + ("noise\n" * 2000)
+
+    detail = w._with_cause_hints(combined)
+
+    assert "[first exception in the omitted output] ValueError: boom" in detail
+
+
+def test_failure_detail_reports_a_short_summary_exception_behind_a_long_node_id() -> None:
+    # Edge: a long id must not push the exception out of the capped excerpt.
+    node_id = "tests/test_a.py::test_x[" + ("p" * 600) + "]"
+    combined = f"[Pytest/x]   | ERROR {node_id} - OSError: disk full\n" + ("noise\n" * 2000)
+
+    detail = w._with_cause_hints(combined)
+
+    assert "[first exception in the omitted output] OSError: disk full" in detail
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "tests/test_a.py::test_x[TypeError: boom]",
+        "tests/test_a.py::TestK::test_x[ValueError: a-b: c]",
+        "tests/test_a.py::test_x[a] b TypeError: boom] PASSED",
+        "PASSED tests/test_a.py::test_x[x] y: TypeError: z] ",
+        "scripts/y.py::test_z[Exception: x] PASSED",
+        "FAILED tests/test_a.py::test_x[TypeError: boom]",
+        "FAILED tests/test_a.py::test_x[a - b]-TypeError: boom",
+    ],
+)
+def test_omitted_exception_hint_ignores_a_node_id_line_without_a_summary_exception(line) -> None:
+    assert w._omitted_exception_hint(f"{line}\nnoise") is None
 
 
 def test_failure_detail_caps_a_long_omitted_exception_line() -> None:
@@ -2939,6 +3331,199 @@ def test_pytest_workflow_never_dry_runs_the_windows_pwsh_job(monkeypatch):
     for target in _planned_targets(calls):
         assert not (_transitive_needs(bodies, target) & windows), target
     assert "job main-failure-alert: skipped, needs test-windows-pwsh" in res.detail
+
+
+# --- Full-suite jobs are skipped in the full act stage (#6794) -------------
+
+_SUITE_RUN = "uv run --frozen python scripts/ci/run_pytest_partition.py --partition split-1"
+
+
+def _write_step_wf(tmp_path: Path, jobs: dict[str, dict[str, object]]) -> None:
+    """Write ``WF`` with each job body as given; ``runs-on`` defaults to Linux."""
+    doc = {
+        "name": "x",
+        "on": "push",
+        "jobs": {
+            name: {
+                "runs-on": "ubuntu-latest",
+                **body,
+                "steps": body.get("steps", [{"run": "echo"}]),
+            }
+            for name, body in jobs.items()
+        },
+    }
+    wf = tmp_path / WF
+    wf.parent.mkdir(parents=True, exist_ok=True)
+    wf.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+
+def _suite_job() -> dict[str, object]:
+    return {"steps": [{"uses": "actions/checkout"}, {"name": "Run pytest", "run": _SUITE_RUN}]}
+
+
+def test_full_suite_jobs_finds_only_jobs_that_run_the_partition_runner(tmp_path):
+    _write_step_wf(
+        tmp_path,
+        {
+            "lint": {"steps": [{"run": "ruff check ."}]},
+            "test": _suite_job(),
+            "named": {"steps": [{"name": "run_pytest_partition.py is mentioned", "run": "echo"}]},
+        },
+    )
+    assert w._full_suite_jobs(tmp_path / WF) == ["test"]
+
+
+@pytest.mark.parametrize(
+    ("run", "expected"),
+    [
+        (_SUITE_RUN, True),
+        ("python scripts/ci/run_pytest_partition.py --partition x", True),
+        ("python3.14 -u scripts/ci/run_pytest_partition.py", True),
+        ("cd . && uv run python scripts/ci/run_pytest_partition.py\n", True),
+        ("uv run --frozen --extra dev python scripts/ci/run_pytest_partition.py", True),
+        ("FOO=1 python scripts/ci/run_pytest_partition.py", True),
+        ("ruff check .\npython scripts/ci/run_pytest_partition.py", True),
+        ("if true; then python scripts/ci/run_pytest_partition.py; fi", True),
+        ("test -f scripts/ci/run_pytest_partition.py && ruff check .", False),
+        ("uv run -q --frozen python scripts/ci/run_pytest_partition.py", True),
+        ("uv run --python=3.14 python scripts/ci/run_pytest_partition.py", True),
+        ("python \\\n  scripts/ci/run_pytest_partition.py --partition x", True),
+        ("cat <<EOF > a.txt\npython scripts/ci/run_pytest_partition.py\nEOF\nruff check .", False),
+        (
+            "cat <<'EOF'\nx\nEOF\npython scripts/ci/run_pytest_partition.py",
+            True,
+        ),
+        ("uv run echo python scripts/ci/run_pytest_partition.py", False),
+        ("echo python scripts/ci/run_pytest_partition.py", False),
+        ("printf python scripts/ci/run_pytest_partition.py", False),
+        ("# python scripts/ci/run_pytest_partition.py\nruff check .", False),
+        ("cat scripts/ci/run_pytest_partition.py", False),
+        ("python scripts/ci/run_pytest_partition.py.bak", False),
+        ("python scripts/ci/other.py", False),
+    ],
+)
+def test_full_suite_detection_needs_an_interpreter_invocation(tmp_path, run, expected):
+    _write_step_wf(tmp_path, {"a": {"steps": [{"run": run}]}})
+    assert (w._full_suite_jobs(tmp_path / WF) == ["a"]) is expected
+
+
+@pytest.mark.parametrize("content", ["", "jobs: [", "jobs: nope\n", "jobs:\n  a: nope\n"])
+def test_full_suite_jobs_tolerates_malformed_workflows(tmp_path, content):
+    wf = tmp_path / WF
+    wf.parent.mkdir(parents=True, exist_ok=True)
+    wf.write_text(content, encoding="utf-8")
+    assert w._full_suite_jobs(wf) == []
+
+
+def test_full_suite_jobs_ignores_steps_without_a_run_string(tmp_path):
+    _write_step_wf(tmp_path, {"a": {"steps": [{"uses": "x"}, "text", {"run": 3}]}})
+    assert w._full_suite_jobs(tmp_path / WF) == []
+
+
+def test_full_suite_jobs_missing_file_is_empty(tmp_path):
+    assert w._full_suite_jobs(tmp_path / "absent.yml") == []
+
+
+def test_act_full_stage_skips_full_suite_job_and_warns(monkeypatch, tmp_path):
+    _write_step_wf(tmp_path, {"lint": {}, "test": _suite_job(), "docs": {}})
+    calls = _record_calls(monkeypatch)
+
+    res = w._act_full_stage([WF], tmp_path)
+
+    assert res.ok is True
+    assert calls == [
+        ["gh", "act", "-j", "lint", "-W", WF],
+        ["gh", "act", "-j", "docs", "-W", WF],
+    ]
+    assert res.detail == (
+        f"[WARN] {WF} job test: skipped, it runs the whole test suite "
+        f"({w._FULL_SUITE_RUNNER}), which cannot finish inside the "
+        f"{w._ACT_FULL_TIMEOUT}s act stage budget. CI runs it."
+    )
+
+
+def test_act_dryrun_stage_still_plans_the_full_suite_job(monkeypatch, tmp_path):
+    _write_step_wf(tmp_path, {"lint": {}, "test": _suite_job()})
+    calls = _record_calls(monkeypatch)
+
+    res = w._act_dryrun_stage([WF], tmp_path)
+
+    assert res.ok is True
+    assert calls == [
+        ["gh", "act", "-n", "-j", "lint", "-W", WF],
+        ["gh", "act", "-n", "-j", "test", "-W", WF],
+    ]
+    assert res.detail == ""
+
+
+def test_full_suite_skip_also_skips_jobs_that_need_it(monkeypatch, tmp_path):
+    _write_step_wf(
+        tmp_path,
+        {"lint": {}, "test": _suite_job(), "coverage": {"needs": "test"}},
+    )
+    calls = _record_calls(monkeypatch)
+
+    res = w._act_full_stage([WF], tmp_path)
+
+    assert calls == [["gh", "act", "-j", "lint", "-W", WF]]
+    assert "job test: skipped, it runs the whole test suite" in res.detail
+    assert f"{WF} job coverage: skipped, needs test, which is skipped." in res.detail
+
+
+def test_workflow_with_only_the_full_suite_job_runs_no_act_and_passes(monkeypatch, tmp_path):
+    """A push that edits only the suite workflow must not hang on act (#6794)."""
+    _write_step_wf(tmp_path, {"test": _suite_job()})
+    calls = _record_calls(monkeypatch)
+
+    res = w._act_full_stage([WF], tmp_path)
+
+    assert res.ok is True
+    assert calls == []
+    assert "job test: skipped" in res.detail
+
+
+def test_full_suite_skip_does_not_hide_a_failing_sibling_job(monkeypatch, tmp_path):
+    _write_step_wf(tmp_path, {"lint": {}, "test": _suite_job()})
+    monkeypatch.setattr(w, "_run", lambda cmd, *, timeout, cwd=None, env=None: (1, "", "boom"))
+
+    res = w._act_full_stage([WF], tmp_path)
+
+    assert res.ok is False
+    assert "boom" in res.detail
+
+
+def test_full_suite_and_windows_skips_both_warn(monkeypatch, tmp_path):
+    _write_step_wf(
+        tmp_path,
+        {"lint": {}, "test": _suite_job(), "win": {"runs-on": "windows-latest"}},
+    )
+    calls = _record_calls(monkeypatch)
+
+    res = w._act_full_stage([WF], tmp_path)
+
+    assert calls == [["gh", "act", "-j", "lint", "-W", WF]]
+    assert "job win: skipped, runs-on windows-latest" in res.detail
+    assert "job test: skipped, it runs the whole test suite" in res.detail
+
+
+def test_pytest_workflow_full_stage_never_runs_the_test_job(monkeypatch):
+    """Regression for #6794: the full test job cannot finish in the stage budget."""
+    rel = ".github/workflows/pytest.yml"
+    calls = _record_calls(monkeypatch)
+    # The checkout under test may be a linked worktree; the git mount is not under test.
+    monkeypatch.setattr(w, "_worktree_git_mount", lambda repo_root: contextlib.nullcontext([]))
+
+    res = w._act_full_stage([rel], REPO_ROOT)
+
+    assert res.ok is True
+    assert calls, "pytest.yml still has fast Linux jobs to run"
+    assert ["-j", "test"] not in [cmd[2:4] for cmd in calls]
+    assert "job test: skipped, it runs the whole test suite" in res.detail
+    bodies = w._workflow_job_bodies(REPO_ROOT / rel)
+    suite = set(w._full_suite_jobs(REPO_ROOT / rel))
+    assert suite == {"test"}
+    for target in _planned_targets(calls):
+        assert not (_transitive_needs(bodies, target) & suite), target
 
 
 def test_windows_jobs_is_empty_without_pyyaml(monkeypatch, tmp_path):
