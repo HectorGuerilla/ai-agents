@@ -13,13 +13,20 @@ pairs are matched. It makes no model call and starts no process.
 
 `--live` is the only way to spend. It fails closed: without a credential for
 every harness in the plan the run stops with exit 4 before any process
-starts, and it never falls back to the dry run's output as a result.
+starts, and it never falls back to the dry run's output as a result. It then
+reads `<cli> --version` for every planned harness and refuses unless each one
+equals the capability matrix pin, because every result row stamps that pin as
+its harness version. It reads the version again before every row, so a CLI that
+auto-updates between rows stops the run: that row and every later row are written
+`NOT_RUN` with the reason. An update during a row is caught at the next row.
 
 Exit codes (AGENTS.md): 0 the plan holds at least one planned combination, or a
 live run finished with no harness failure. 1 nothing is plannable, or the plan
 has problems (every combination rejected, or a config harness the matrix does
-not classify). 2 invalid config, matrix, corpus, or arguments. 3 a live run hit
-a harness failure. 4 `--live` without the credentials it needs.
+not classify). 2 invalid config, matrix, corpus, or arguments, or an installed
+harness CLI that differs from its matrix pin. 3 a live run hit a harness
+failure, or a harness CLI version could not be read. 4 `--live` without the
+credentials it needs.
 """
 
 from __future__ import annotations
@@ -39,7 +46,11 @@ from _routing_live import (
     InvocationBudget,
     LiveBackend,
     LiveGateError,
+    VersionGateError,
+    VersionProbe,
+    installed_version,
     require_live_authorization,
+    require_pinned_versions,
 )
 from _routing_plan import Plan, PlanRow, build_plan
 from _routing_result import RunStatus, result_to_dict
@@ -147,20 +158,33 @@ def _run_live(
     real_home: bool,
     budget: InvocationBudget,
     repetitions: int,
+    probe: VersionProbe,
 ) -> int:
-    """Run the planned rows, repetition outermost, and stop at the budget.
+    """Run the planned rows, repetition outermost, and stop at the budget or a version drift.
 
     Each row is appended to `output` as it finishes, so an interrupted run keeps
-    what it spent. A row the budget cuts off, and every row after it, is written
+    what it spent. Before each row the row's harness CLI is probed again, so an
+    auto-update mid-run stops the run instead of mislabeling the rows after it.
+    A row the budget or the probe cuts off, and every row after it, is written
     as `NOT_RUN` with the reason. Nothing is substituted for a row that did not run.
+    A version stop's exit code (2 drift, 3 probe failure) wins over a row failure.
     """
     failed = False
     spent_out = False
+    stop: VersionGateError | None = None
     with output.open("w", encoding="utf-8") as handle:
         for repetition in range(1, repetitions + 1):
             for row in plan.planned:
+                try:
+                    if not spent_out and stop is None:
+                        require_pinned_versions({row.harness: row.harness_version}, probe)
+                except VersionGateError as exc:
+                    stop = exc
+                    print(f"error: live run stopped at {row.scenario_id}, {exc}", file=sys.stderr)
                 if spent_out:
                     item = _not_run(row, repetition, "invocation budget spent")
+                elif stop is not None:
+                    item = _not_run(row, repetition, str(stop))
                 else:
                     item, failed_row, spent_out = _run_row(
                         row, config, scenarios, budget, repetition, real_home
@@ -168,6 +192,8 @@ def _run_live(
                     failed = failed or failed_row
                 handle.write(json.dumps(item) + "\n")
                 handle.flush()
+    if stop is not None:
+        return int(stop.exit_code)
     return EXIT_HARNESS_FAILURE if failed else EXIT_OK
 
 
@@ -211,6 +237,10 @@ def _only_arms(plan: Plan, arms: str) -> Plan:
 
 def _live_budget(args: argparse.Namespace) -> InvocationBudget | None:
     """The run's invocation budget, `None` when not live. Raises `ValueError` on a bad mix."""
+    if args.live and args.output is None:
+        raise ValueError("--live requires --output")
+    if args.output is not None and not args.live:
+        raise ValueError("--output is only valid with --live")
     if not args.live:
         if (
             args.real_home
@@ -227,12 +257,6 @@ def _live_budget(args: argparse.Namespace) -> InvocationBudget | None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.live and args.output is None:
-        print("error: --live requires --output", file=sys.stderr)
-        return EXIT_CONFIG
-    if args.output is not None and not args.live:
-        print("error: --output is only valid with --live", file=sys.stderr)
-        return EXIT_CONFIG
     try:
         budget = _live_budget(args)
     except ValueError as exc:
@@ -264,6 +288,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not plan.planned:
             print(f"error: --arms {args.arms} selects no planned row", file=sys.stderr)
             return EXIT_NOTHING_PLANNED
+    try:
+        require_pinned_versions(
+            {row.harness: row.harness_version for row in plan.planned}, installed_version
+        )
+    except VersionGateError as exc:
+        print(f"error: live run refused, {exc}", file=sys.stderr)
+        return int(exc.exit_code)
     return _run_live(
         plan,
         config,
@@ -272,6 +303,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         real_home=args.real_home,
         budget=budget or InvocationBudget(1),
         repetitions=args.repetitions,
+        probe=installed_version,
     )
 
 
