@@ -92,6 +92,7 @@
 |security vulnerability TOCTOU secret injection: [skills-security-index](skills-security-index.md) (508)
 |filesystem redirect symlink junction ancestor parent swap descriptor: [security/filesystem-redirect-boundaries](security/filesystem-redirect-boundaries.md) (154)
 |integrity gate noise stale outcome exemption merge base fail-open verifier: [security/integrity-gate-noise-needs-stale-class-not-exemption](security/integrity-gate-noise-needs-stale-class-not-exemption.md) (202)
+|uv exclude-newer cooldown security dependency bump certifi opentelemetry semgrep override-dependencies SAFE_SEMGREP_OVERRIDES parity test: [python/uv-cooldown-security-dependency-bumps](python/uv-cooldown-security-dependency-bumps.md) (368)
 
 [Architecture and Design]
 |architecture ADR model composite tool allocation producer-consumer: [skills-architecture-index](skills-architecture-index.md) (627)
@@ -252,3 +253,6 @@
 |fragmentation tech-debt: [memory/memory-system-fragmentation-tech-debt](memory/memory-system-fragmentation-tech-debt.md) (940)
 |serena subdirectory convention nested read_memory rglob enumeration: [memory/serena-memory-subdirectory-convention](memory/serena-memory-subdirectory-convention.md) (1298)
 |codeql scan wrapper delegate python issue 4921: [codeql/codeql-scan-wrapper-python-delegates](codeql/codeql-scan-wrapper-python-delegates.md) (930)
+|pytest-split durations cache frozen cancelled leg split-1 timeout duration_based_chunks least_duration module split scatter whole-repo scan 6846 6853 6857 rerun in_progress required check 6828 6830: [ci/pytest-split-cache-freeze-repeats-timeout](ci/pytest-split-cache-freeze-repeats-timeout.md) (545)
+|stale main clone skill script missing flag remove-labels set_issue_labels detached worktree origin/main git pull denied: [git/git-stale-detached-clone-runs-stale-tooling](git/git-stale-detached-clone-runs-stale-tooling.md) (984)
+|lefthook pre-push job already_run_by deferral target glob files skip unscoped pre_pr gate passed nothing run 5317 6734 slice 3 scoping speed: [ci/prepush-deferral-targets-stay-unscoped](ci/prepush-deferral-targets-stay-unscoped.md) (304)
