@@ -16,8 +16,11 @@ from scan_bash_heredoc import (
     Heredoc,
     begin_heredoc,
     blank_outside_substitutions,
+    is_plain_context,
     is_terminator,
     mark_shell_fed,
+    redirects_stdout_with_exec,
+    update_scope,
 )
 
 # Bash lexer modes. A stack of these tracks quote and substitution nesting.
@@ -457,6 +460,8 @@ def scrub_bash_lines(lines: Sequence[str]) -> list[str]:
     result: list[str] = []
     stack: list[str] = []
     queue: deque[Heredoc] = deque()
+    scope: list[str] = []
+    exec_redirected = False
     active: Heredoc | None = None
     quote_from: int | None = None
     body_from: int | None = None
@@ -472,7 +477,14 @@ def scrub_bash_lines(lines: Sequence[str]) -> list[str]:
         was_open = bool(stack)
         pending: deque[Heredoc] = deque()
         result.append(_lex_line(line, stack, pending))
-        pending = mark_shell_fed(pending, result[-1], continued=line.rstrip("\n").endswith("\\"))
+        update_scope(scope, result[-1])
+        exec_redirected = exec_redirected or redirects_stdout_with_exec(result[-1])
+        pending = mark_shell_fed(
+            pending,
+            result[-1],
+            continued=line.rstrip("\n").endswith("\\"),
+            plain_ok=is_plain_context(scope) and not exec_redirected,
+        )
         if not stack:
             quote_from = None
         elif not was_open:

@@ -178,16 +178,63 @@ def _is_print_only(opener: str) -> bool:
 
     Fails closed. Any `>` (a file or process redirect, `>>`, `&>`, `>(tee x)`)
     keeps the body on the scan, because `cat > gen.sh <<EOF` then `bash gen.sh`
-    runs the expanded text. So does any consuming segment whose command word is
-    not in `_TEXT_READERS`, which covers `tee`, shells, and interpreters.
+    runs the expanded text. So does any segment whose command word is not in
+    `_TEXT_READERS`, which covers `tee`, shells, and interpreters. Every segment
+    counts, not only the ones that read the body, because the opener's other
+    here-documents share this verdict (`cat <<A; bash <<B`).
     """
     if ">" in _FD_DUP_RE.sub("", opener):
         return False
-    segments = _consumers(opener)
-    return bool(segments) and all(map(_segment_is_print_only, segments))
+    consumers = _consumers(opener)
+    if not consumers or not all(map(_segment_is_print_only, consumers)):
+        return False
+    segments = _SEGMENT_SPLIT_RE.split(opener)[0::2]
+    return all(not seg.strip() or _segment_is_print_only(seg) for seg in segments)
 
 
-def mark_shell_fed(pending: deque[Heredoc], opener: str) -> deque[Heredoc]:
+_SCOPE_TOKEN_RE = re.compile(r"\$\(|\(|\)|(?<![^\s;&|(])\{(?=\s|$)|(?<![^\s;&|])\}(?=[\s;&|)]|$)")
+_EXEC_REDIRECT_RE = re.compile(r"(?:^|[\s;&|(){}])exec\b[^;&|\n]*>")
+
+
+def update_scope(stack: list[str], scrubbed: str) -> None:
+    """Track open `$( )` (S), subshell (P), and `{ }` group or function body (B) scopes.
+
+    Fed with scrubbed lines, so quoted text is already blank. A `)` or `}` that
+    matches no open scope (a `case` pattern) is ignored.
+    """
+    for token in (m.group() for m in _SCOPE_TOKEN_RE.finditer(scrubbed)):
+        if token == "$(":
+            stack.append("S")
+        elif token == "(":
+            stack.append("P")
+        elif token == "{":
+            stack.append("B")
+        elif stack and (
+            (token == "}" and stack[-1] == "B") or (token == ")" and stack[-1] in "SP")
+        ):
+            stack.pop()
+
+
+def is_plain_context(stack: list[str]) -> bool:
+    """False inside a subshell, group, or function body.
+
+    A redirect or pipe on the closer (`} > gen.sh`, `) | bash`) is on a later line.
+    """
+    return "P" not in stack and "B" not in stack
+
+
+def redirects_stdout_with_exec(scrubbed: str) -> bool:
+    """True for `exec >file` or `exec 1>file`, which sends later stdout to a file."""
+    return _EXEC_REDIRECT_RE.search(scrubbed) is not None
+
+
+def mark_shell_fed(
+    pending: deque[Heredoc],
+    opener: str,
+    *,
+    continued: bool = False,
+    plain_ok: bool = True,
+) -> deque[Heredoc]:
     """Return `pending` with bodies a shell reads no longer inert or plain.
 
     A quoted delimiter stops the outer shell from expanding the body. When the
@@ -195,11 +242,14 @@ def mark_shell_fed(pending: deque[Heredoc], opener: str) -> deque[Heredoc]:
     `su`, `sudo -i`, `chroot`, `at`, `source <(`, `$SHELL`), that command may
     run the body, so its unquoted expansions are real.
 
-    An unquoted body stays `plain` only when `_is_print_only` holds.
+    An unquoted body stays `plain` only when `_is_print_only` holds and the opener
+    is not `continued` and `plain_ok`. `plain_ok` is false inside a group or after an
+    earlier `exec >file`, where stdout may reach a file or shell. A trailing `\\` joins the next line to the command (`cat <<EOF \\`
+    then `> gen.sh`), so the real body starts later than the scanner assumes.
     """
     if _feeds_shell(opener):
         return deque(replace(h, inert=False, plain=False) for h in pending)
-    if not _is_print_only(opener):
+    if continued or not plain_ok or not _is_print_only(opener):
         return deque(replace(h, plain=False) for h in pending)
     return pending
 
@@ -208,7 +258,9 @@ def blank_outside_substitutions(line: str) -> tuple[str, bool]:
     """Blank a plain-body line except `$( )` and backtick text; say if it resolved.
 
     Returns the scrubbed line and whether every substitution and quote closed on
-    this line. A backslash escapes the next character, so `\\$(x)` is literal.
+    this line. A backslash escapes the next character, so `\\$(x)` is literal. A
+    backslash at end of line joins the next line (`$\\` then `(x)`), so it is
+    unresolved.
     Quotes inside a substitution are tracked so a `)` in a string does not end
     it. When something is still open at end of line, the caller scans the rest
     of the body one line at a time, so nothing after it is hidden.
@@ -218,11 +270,13 @@ def blank_outside_substitutions(line: str) -> tuple[str, bool]:
     depth = 0
     tick = False
     quote = ""
+    joined = False
     i = 0
     while i < len(body):
         ch = body[i]
         if depth == 0 and not tick:
             if ch == "\\":
+                joined = joined or i + 1 == len(body)
                 out.append(" " * len(body[i : i + 2]))
                 i += 2
             elif body.startswith("$(", i):
@@ -236,6 +290,7 @@ def blank_outside_substitutions(line: str) -> tuple[str, bool]:
             continue
         out.append(ch)
         if ch == "\\" and quote != "'":
+            joined = joined or i + 1 == len(body)
             out.append(body[i + 1 : i + 2])
             i += 2
             continue
@@ -250,4 +305,5 @@ def blank_outside_substitutions(line: str) -> tuple[str, bool]:
         elif ch == ")":
             depth -= 1
         i += 1
-    return "".join(out) + line[len(body) :], depth == 0 and not tick and not quote
+    resolved = depth == 0 and not tick and not quote and not joined
+    return "".join(out) + line[len(body) :], resolved

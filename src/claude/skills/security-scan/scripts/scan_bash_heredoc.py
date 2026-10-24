@@ -192,8 +192,48 @@ def _is_print_only(opener: str) -> bool:
     return all(not seg.strip() or _segment_is_print_only(seg) for seg in segments)
 
 
+_SCOPE_TOKEN_RE = re.compile(r"\$\(|\(|\)|(?<![^\s;&|(])\{(?=\s|$)|(?<![^\s;&|])\}(?=[\s;&|)]|$)")
+_EXEC_REDIRECT_RE = re.compile(r"(?:^|[\s;&|(){}])exec\b[^;&|\n]*>")
+
+
+def update_scope(stack: list[str], scrubbed: str) -> None:
+    """Track open `$( )` (S), subshell (P), and `{ }` group or function body (B) scopes.
+
+    Fed with scrubbed lines, so quoted text is already blank. A `)` or `}` that
+    matches no open scope (a `case` pattern) is ignored.
+    """
+    for token in (m.group() for m in _SCOPE_TOKEN_RE.finditer(scrubbed)):
+        if token == "$(":
+            stack.append("S")
+        elif token == "(":
+            stack.append("P")
+        elif token == "{":
+            stack.append("B")
+        elif stack and (
+            (token == "}" and stack[-1] == "B") or (token == ")" and stack[-1] in "SP")
+        ):
+            stack.pop()
+
+
+def is_plain_context(stack: list[str]) -> bool:
+    """False inside a subshell, group, or function body.
+
+    A redirect or pipe on the closer (`} > gen.sh`, `) | bash`) is on a later line.
+    """
+    return "P" not in stack and "B" not in stack
+
+
+def redirects_stdout_with_exec(scrubbed: str) -> bool:
+    """True for `exec >file` or `exec 1>file`, which sends later stdout to a file."""
+    return _EXEC_REDIRECT_RE.search(scrubbed) is not None
+
+
 def mark_shell_fed(
-    pending: deque[Heredoc], opener: str, *, continued: bool = False
+    pending: deque[Heredoc],
+    opener: str,
+    *,
+    continued: bool = False,
+    plain_ok: bool = True,
 ) -> deque[Heredoc]:
     """Return `pending` with bodies a shell reads no longer inert or plain.
 
@@ -203,12 +243,13 @@ def mark_shell_fed(
     run the body, so its unquoted expansions are real.
 
     An unquoted body stays `plain` only when `_is_print_only` holds and the opener
-    is not `continued`. A trailing `\\` joins the next line to the command (`cat <<EOF \\`
+    is not `continued` and `plain_ok`. `plain_ok` is false inside a group or after an
+    earlier `exec >file`, where stdout may reach a file or shell. A trailing `\\` joins the next line to the command (`cat <<EOF \\`
     then `> gen.sh`), so the real body starts later than the scanner assumes.
     """
     if _feeds_shell(opener):
         return deque(replace(h, inert=False, plain=False) for h in pending)
-    if continued or not _is_print_only(opener):
+    if continued or not plain_ok or not _is_print_only(opener):
         return deque(replace(h, plain=False) for h in pending)
     return pending
 

@@ -819,6 +819,35 @@ def test_scan_file_plain_heredoc_line_continuation_joins_substitution(tmp_path: 
     assert 3 in _unquoted_lines(tmp_path, body)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "exec >gen.sh\ncat <<EOF\nrm $target\nEOF\n",
+        "exec 1>gen.sh\ncat <<EOF\nrm $target\nEOF\n",
+        "f() { cat <<EOF\nrm $target\nEOF\n} > gen.sh\n",
+        "f() {\ncat <<EOF\nrm $target\nEOF\n}\nf > gen.sh\n",
+        "{ cat <<EOF\nrm $target\nEOF\n} | bash\n",
+        "{\ncat <<EOF\nrm $target\nEOF\n} | bash\n",
+        "( cat <<EOF\nrm $target\nEOF\n) | bash\n",
+    ],
+)
+def test_scan_file_unquoted_heredoc_whose_stdout_may_reach_a_file_stays_flagged(
+    tmp_path: Path, body: str
+) -> None:
+    """Redirects on `exec`, a group closer, or a function call send the body to a file or shell."""
+    assert {2, 3} & set(_unquoted_lines(tmp_path, body))
+
+
+def test_scan_file_plain_heredoc_after_closed_group_clears_variable(tmp_path: Path) -> None:
+    body = "{ echo hi; }\ncat <<EOF\nUsage: $0\nEOF\nrm $after\n"
+    assert _unquoted_lines(tmp_path, body) == [5]
+
+
+def test_scan_file_exec_without_stdout_redirect_keeps_plain_heredoc(tmp_path: Path) -> None:
+    body = "exec 3<in.txt\ncat <<EOF\nUsage: $0\nEOF\n"
+    assert _unquoted_lines(tmp_path, body) == []
+
+
 def test_scan_file_issue_6624_probe_generated_script_stays_flagged(tmp_path: Path) -> None:
     """`cat > gen.sh <<EOF` then `bash gen.sh` ran injected text in the #6624 probe."""
     body = "cat > gen.sh <<EOF\nrm $target\nEOF\nbash gen.sh\n"
