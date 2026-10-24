@@ -16,7 +16,7 @@ from scan_bash_heredoc import (
     Heredoc,
     begin_heredoc,
     blank_outside_substitutions,
-    is_plain_context,
+    closers_stay_clean,
     is_terminator,
     mark_shell_fed,
     redirects_stdout_with_exec,
@@ -479,11 +479,14 @@ def scrub_bash_lines(lines: Sequence[str]) -> list[str]:
         result.append(_lex_line(line, stack, pending))
         update_scope(scope, result[-1])
         exec_redirected = exec_redirected or redirects_stdout_with_exec(result[-1])
+        plain_ok = not exec_redirected and (
+            not pending or closers_stay_clean(lines, index, scope, list(pending), scrub_bash_line)
+        )
         pending = mark_shell_fed(
             pending,
             result[-1],
             continued=line.rstrip("\n").endswith("\\"),
-            plain_ok=is_plain_context(scope) and not exec_redirected,
+            plain_ok=plain_ok,
         )
         if not stack:
             quote_from = None

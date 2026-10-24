@@ -7,6 +7,7 @@ the terminator line.
 
 import re
 from collections import deque
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
 # A here-document opener: `<<`, optional `-`, then the delimiter word. Groups
@@ -215,12 +216,44 @@ def update_scope(stack: list[str], scrubbed: str) -> None:
             stack.pop()
 
 
-def is_plain_context(stack: list[str]) -> bool:
-    """False inside a subshell, group, or function body.
+_CLOSER_SINK_RE = re.compile(r"(?<!\|)\|(?!\|)|>")
 
-    A redirect or pipe on the closer (`} > gen.sh`, `) | bash`) is on a later line.
+
+def closers_stay_clean(
+    lines: Sequence[str],
+    start: int,
+    scope: list[str],
+    pending: Sequence[Heredoc],
+    scrub: Callable[[str], str],
+) -> bool:
+    """True when no enclosing `$( )`, subshell, or `{ }` closer redirects or pipes.
+
+    The heredoc at `lines[start]` sits inside the open scopes in `scope`. A
+    redirect or pipe on a closer (`} > gen.sh`, `) | bash`) sends its stdout to a
+    file or a shell, but sits on a later line than the opener. Walk forward past
+    this opener's own bodies to each closer and test the text after it. Fails
+    closed when a closer is never found. A call-site redirect on a function
+    (`usage > gen.sh`) is not seen.
     """
-    return "P" not in stack and "B" not in stack
+    if not scope:
+        return True
+    stack = list(scope)
+    waiting = deque(pending)
+    for line in lines[start + 1 :]:
+        if waiting:
+            if is_terminator(line, waiting[0]):
+                waiting.popleft()
+            continue
+        text = scrub(line)
+        for match in _SCOPE_TOKEN_RE.finditer(text):
+            before = len(stack)
+            update_scope(stack, match.group())
+            tail = _FD_DUP_RE.sub("", text[match.end() :])
+            if len(stack) < before and _CLOSER_SINK_RE.search(tail):
+                return False
+            if not stack:
+                return True
+    return not stack
 
 
 def redirects_stdout_with_exec(scrubbed: str) -> bool:
@@ -243,9 +276,11 @@ def mark_shell_fed(
     run the body, so its unquoted expansions are real.
 
     An unquoted body stays `plain` only when `_is_print_only` holds and the opener
-    is not `continued` and `plain_ok`. `plain_ok` is false inside a group or after an
-    earlier `exec >file`, where stdout may reach a file or shell. A trailing `\\` joins the next line to the command (`cat <<EOF \\`
-    then `> gen.sh`), so the real body starts later than the scanner assumes.
+    is not `continued` and `plain_ok`. `plain_ok` is false when a closer of an
+    enclosing group redirects or pipes, or after an earlier `exec >file`, where
+    stdout may reach a file or shell. A trailing `\\` joins the next line to the
+    command (`cat <<EOF \\` then `> gen.sh`), so the real body starts later than the
+    scanner assumes.
     """
     if _feeds_shell(opener):
         return deque(replace(h, inert=False, plain=False) for h in pending)

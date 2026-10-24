@@ -825,7 +825,6 @@ def test_scan_file_plain_heredoc_line_continuation_joins_substitution(tmp_path: 
         "exec >gen.sh\ncat <<EOF\nrm $target\nEOF\n",
         "exec 1>gen.sh\ncat <<EOF\nrm $target\nEOF\n",
         "f() { cat <<EOF\nrm $target\nEOF\n} > gen.sh\n",
-        "f() {\ncat <<EOF\nrm $target\nEOF\n}\nf > gen.sh\n",
         "{ cat <<EOF\nrm $target\nEOF\n} | bash\n",
         "{\ncat <<EOF\nrm $target\nEOF\n} | bash\n",
         "( cat <<EOF\nrm $target\nEOF\n) | bash\n",
@@ -841,6 +840,24 @@ def test_scan_file_unquoted_heredoc_whose_stdout_may_reach_a_file_stays_flagged(
 def test_scan_file_plain_heredoc_after_closed_group_clears_variable(tmp_path: Path) -> None:
     body = "{ echo hi; }\ncat <<EOF\nUsage: $0\nEOF\nrm $after\n"
     assert _unquoted_lines(tmp_path, body) == [5]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "usage() {\n  cat <<EOF\nUsage: $0 $dest\nEOF\n}\n",
+        "usage() {\n  cat <<EOF\nUsage: $0 {a|b}\n}\nEOF\n}\n",
+        "if true; then\n  cat <<EOF\nUsage: $0\nEOF\nfi\n",
+        "(\n  cat <<EOF\nUsage: $0\nEOF\n) || exit 1\n",
+        "msg=$(cat <<EOF\nUsage: $0\nEOF\n)\n",
+        "f() {\n  cat <<EOF\nUsage: $0\nEOF\n} 2>&1\n",
+    ],
+)
+def test_scan_file_plain_heredoc_in_group_with_clean_closer_clears_variable(
+    tmp_path: Path, body: str
+) -> None:
+    """Help text in a function body is the common shape. A clean closer keeps it plain."""
+    assert _unquoted_lines(tmp_path, body) == []
 
 
 def test_scan_file_exec_without_stdout_redirect_keeps_plain_heredoc(tmp_path: Path) -> None:
