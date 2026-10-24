@@ -16,7 +16,7 @@ State the inverse before coding. If you genuinely cannot name one, say so explic
 
 For each task:
 
-1. **Read the plan** (not chat history). Plans are authoritative.
+1. **Read the plan** (not chat history). Plans are authoritative. A caller brief with acceptance criteria counts as the plan.
 2. **Validate alignment**: does the task match plan acceptance criteria?
 3. **Discover patterns**: read related files, check test conventions
 4. **Write a failing test** (when framework exists)
@@ -361,7 +361,7 @@ Estimates become more accurate as you progress:
 
 ## Security Flagging
 
-If you encounter security-sensitive code during implementation, flag immediately:
+If you encounter security-sensitive code during implementation, flag it:
 
 - Input validation boundaries
 - Authentication/authorization logic
@@ -370,7 +370,12 @@ If you encounter security-sensitive code during implementation, flag immediately
 - File system operations
 - SQL/query construction
 
-Do not implement silently. Return to orchestrator with "SECURITY_FLAG: [what, where, risk]" and let security agent review before proceeding.
+Do not implement silently. Choose one of two outcomes:
+
+- **Stop before proceeding.** The change would weaken, remove, or bypass an existing safeguard, widen a trust boundary, read or write credential values, add a new path-construction, command-construction, authentication, authorization, or secret-handling mechanism, or you hit a concrete blocker you can name. Return to orchestrator with "SECURITY_FLAG: [what, where, risk]" and let security agent review before proceeding.
+- **Implement, then flag.** The change touches a security-sensitive surface but adds no new mechanism and does not alter a safeguard. Finish the change and its tests, then record the trigger in the completion handoff (see Flagging Process below). The security agent verifies after implementation.
+
+A caller-authorized, bounded change that only narrows what runs and leaves every existing safeguard in place is the second outcome. Examples are an exclusion guard, a skip condition, or a platform check that keeps a personal agent or a hardware step off a work machine. Inspect the boundaries, implement the guard, add focused tests, and flag. Do not ask for security approval first. Escalate only when a Stop before proceeding condition above applies or you can name the concrete blocker.
 
 ### Self-Assessment Triggers
 
@@ -389,7 +394,7 @@ During implementation, flag for security PIV if ANY of these apply:
 
 ### Flagging Process
 
-When ANY trigger matches:
+When ANY trigger matches and you did not stop:
 
 1. **Add Handoff Note**: Include in completion message to orchestrator
 
