@@ -14,13 +14,11 @@ from dataclasses import replace
 
 from scan_bash_heredoc import (
     Heredoc,
+    TopLevel,
     begin_heredoc,
     blank_outside_substitutions,
-    closers_stay_clean,
     is_terminator,
     mark_shell_fed,
-    redirects_stdout_with_exec,
-    update_scope,
 )
 
 # Bash lexer modes. A stack of these tracks quote and substitution nesting.
@@ -442,7 +440,10 @@ def scrub_bash_lines(lines: Sequence[str]) -> list[str]:
     `source /dev/stdin`), the body is code and is scrubbed one line at a time.
     The body of an unquoted-delimiter here-document is scrubbed one line at a
     time, unless it is plain: only a print-only reader (`cat`, `echo`, `printf`)
-    consumes it and the opener has no `>` redirect or `tee`. A `$var` in a plain
+    consumes it, the opener has no `>` redirect or `tee`, and the opener sits at
+    the top level of the file: not inside any function, group, subshell, `$( )`,
+    loop, `if`, or `case`, after no unmatched closer and no `exec >file`, and
+    not across an open quote. A `$var` in a plain
     body is not a word-split argument, so it is blanked; `$( )` and backtick text
     stays visible. `cat > gen.sh <<EOF` is not plain, since `bash gen.sh` runs the
     expanded text. A reader on a later line (`<<'X' |` then `bash`) is not
@@ -460,8 +461,7 @@ def scrub_bash_lines(lines: Sequence[str]) -> list[str]:
     result: list[str] = []
     stack: list[str] = []
     queue: deque[Heredoc] = deque()
-    scope: list[str] = []
-    exec_redirected = False
+    top = TopLevel()
     active: Heredoc | None = None
     quote_from: int | None = None
     body_from: int | None = None
@@ -477,11 +477,9 @@ def scrub_bash_lines(lines: Sequence[str]) -> list[str]:
         was_open = bool(stack)
         pending: deque[Heredoc] = deque()
         result.append(_lex_line(line, stack, pending))
-        update_scope(scope, result[-1])
-        exec_redirected = exec_redirected or redirects_stdout_with_exec(result[-1])
-        plain_ok = not exec_redirected and (
-            not pending or closers_stay_clean(lines, index, scope, list(pending), scrub_bash_line)
-        )
+        # Fail closed: plain only at depth 0 with no quote open across the opener.
+        plain_ok = not was_open and not stack and top.plain_ok(result[-1])
+        top.feed(result[-1])
         pending = mark_shell_fed(
             pending,
             result[-1],

@@ -166,7 +166,7 @@ Machine-readable JSON format including scan timestamp, files scanned, vulnerabil
 
 - String interpolation/concatenation in command construction
 - shell=True in subprocess calls
-- Unquoted variable expansion in shell scripts. A `$var` in a here-document body is skipped when the delimiter is quoted (`<<'EOF'`) or a print-only reader such as `cat` consumes it with no `>` redirect or `tee`. `$( )`, backticks, and shell-fed bodies stay flagged.
+- Unquoted variable expansion in shell scripts. A `$var` in a here-document body is skipped when the delimiter is quoted (`<<'EOF'`), or when a print-only reader such as `cat` consumes it at the top level of the script with no `>` redirect or `tee`. A heredoc inside a function, group, loop, `if`, `case`, or `$( )` stays flagged, as do `$( )`, backticks, and shell-fed bodies.
 - Dynamic command building from external input
 
 ---

@@ -7,7 +7,6 @@ the terminator line.
 
 import re
 from collections import deque
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
 # A here-document opener: `<<`, optional `-`, then the delimiter word. Groups
@@ -160,9 +159,10 @@ _TEXT_READERS = frozenset(
     }
 )  # fmt: skip
 
-# A descriptor duplication such as `>&2` or `2>&1` writes no file, so it is
-# removed before the `>` test.
-_FD_DUP_RE = re.compile(r"[0-9]*>&[0-9]+-?")
+# A duplication onto stdout or stderr (`>&2`, `2>&1`) writes no file, so it is
+# removed before the `>` test. Any other target (`>&3`) may be a file opened
+# elsewhere, so it stays a redirect.
+_FD_DUP_RE = re.compile(r"[0-9]*>&[12](?![0-9])-?")
 
 
 def _segment_is_print_only(segment: str) -> bool:
@@ -193,72 +193,60 @@ def _is_print_only(opener: str) -> bool:
     return all(not seg.strip() or _segment_is_print_only(seg) for seg in segments)
 
 
-_SCOPE_TOKEN_RE = re.compile(r"\$\(|\(|\)|(?<![^\s;&|(])\{(?=\s|$)|(?<![^\s;&|])\}(?=[\s;&|)]|$)")
+# Scope tokens. Openers match loosely and closers strictly, so a misread can
+# only leave the depth too high (the body stays on the scan), never too low.
+# `{` counts anywhere it is followed by a blank (not `${`); `}` only in command
+# position. Compound keywords open anywhere as a word; they close only in
+# command position. `then`, `do`, `else`, and `elif` change no depth.
+_SCOPE_TOKEN_RE = re.compile(
+    r"\$\(|\(|\)|(?<![$\w])\{(?=\s|$)|(?<![^\s;&|])\}(?=[\s;&|)]|$)"
+    r"|\b(?:if|for|while|until|select|case)\b"
+    r"|(?:^|(?<=[;&|(){}]))[ \t]*(?:fi|done|esac)(?=[\s;&|()]|$)"
+)
+_SCOPE_OPEN = {"$(": "S", "(": "P", "{": "B"}
+_SCOPE_CLOSE = {")": "SP", "}": "B", "fi": "K", "done": "K", "esac": "K"}
 _EXEC_REDIRECT_RE = re.compile(r"(?:^|[\s;&|(){}])exec\b[^;&|\n]*>")
 
 
-def update_scope(stack: list[str], scrubbed: str) -> None:
-    """Track open `$( )` (S), subshell (P), and `{ }` group or function body (B) scopes.
+class TopLevel:
+    """Fail-closed tracker: is a here-document opener at nesting depth 0?
 
-    Fed with scrubbed lines, so quoted text is already blank. A `)` or `}` that
-    matches no open scope (a `case` pattern) is ignored.
+    Fed every scrubbed line outside here-document bodies. A body may be plain
+    only when, before its opener line, no `$( )`, subshell, `{ }` group, or
+    compound command (`if`, `for`, `while`, `until`, `select`, `case`) is open,
+    no closer has ever failed to match an opener, and no `exec` has redirected
+    stdout; and the opener line itself holds no scope token. An unmatched closer
+    (a `case` pattern `a)`, a stray `}`) sets a sticky `desynced` flag, so every
+    later body in the file stays on the scan. There is no attempt to follow a
+    closer's redirect: any nesting at all keeps the body flagged.
     """
-    for token in (m.group() for m in _SCOPE_TOKEN_RE.finditer(scrubbed)):
-        if token == "$(":
-            stack.append("S")
-        elif token == "(":
-            stack.append("P")
-        elif token == "{":
-            stack.append("B")
-        elif stack and (
-            (token == "}" and stack[-1] == "B") or (token == ")" and stack[-1] in "SP")
-        ):
-            stack.pop()
 
+    def __init__(self) -> None:
+        self.stack: list[str] = []
+        self.desynced = False
+        self.exec_redirected = False
 
-_CLOSER_SINK_RE = re.compile(r"(?<!\|)\|(?!\|)|>")
+    def plain_ok(self, scrubbed_opener: str) -> bool:
+        """True when a body opened on `scrubbed_opener` may be plain."""
+        return (
+            not self.stack
+            and not self.desynced
+            and not self.exec_redirected
+            and _SCOPE_TOKEN_RE.search(scrubbed_opener) is None
+        )
 
-
-def closers_stay_clean(
-    lines: Sequence[str],
-    start: int,
-    scope: list[str],
-    pending: Sequence[Heredoc],
-    scrub: Callable[[str], str],
-) -> bool:
-    """True when no enclosing `$( )`, subshell, or `{ }` closer redirects or pipes.
-
-    The heredoc at `lines[start]` sits inside the open scopes in `scope`. A
-    redirect or pipe on a closer (`} > gen.sh`, `) | bash`) sends its stdout to a
-    file or a shell, but sits on a later line than the opener. Walk forward past
-    this opener's own bodies to each closer and test the text after it. Fails
-    closed when a closer is never found. A call-site redirect on a function
-    (`usage > gen.sh`) is not seen.
-    """
-    if not scope:
-        return True
-    stack = list(scope)
-    waiting = deque(pending)
-    for line in lines[start + 1 :]:
-        if waiting:
-            if is_terminator(line, waiting[0]):
-                waiting.popleft()
-            continue
-        text = scrub(line)
-        for match in _SCOPE_TOKEN_RE.finditer(text):
-            before = len(stack)
-            update_scope(stack, match.group())
-            tail = _FD_DUP_RE.sub("", text[match.end() :])
-            if len(stack) < before and _CLOSER_SINK_RE.search(tail):
-                return False
-            if not stack:
-                return True
-    return not stack
-
-
-def redirects_stdout_with_exec(scrubbed: str) -> bool:
-    """True for `exec >file` or `exec 1>file`, which sends later stdout to a file."""
-    return _EXEC_REDIRECT_RE.search(scrubbed) is not None
+    def feed(self, scrubbed: str) -> None:
+        """Update depth, desync, and `exec` state from one scrubbed line."""
+        if _EXEC_REDIRECT_RE.search(scrubbed):
+            self.exec_redirected = True
+        for token in (m.group().strip() for m in _SCOPE_TOKEN_RE.finditer(scrubbed)):
+            kind = _SCOPE_OPEN.get(token, "K" if token not in _SCOPE_CLOSE else None)
+            if kind is not None:
+                self.stack.append(kind)
+            elif self.stack and self.stack[-1] in _SCOPE_CLOSE[token]:
+                self.stack.pop()
+            else:
+                self.desynced = True
 
 
 def mark_shell_fed(
@@ -276,8 +264,8 @@ def mark_shell_fed(
     run the body, so its unquoted expansions are real.
 
     An unquoted body stays `plain` only when `_is_print_only` holds and the opener
-    is not `continued` and `plain_ok`. `plain_ok` is false when a closer of an
-    enclosing group redirects or pipes, or after an earlier `exec >file`, where
+    is not `continued` and `plain_ok`. `plain_ok` comes from `TopLevel`: false
+    inside any nesting, after a desync, or after an earlier `exec >file`, where
     stdout may reach a file or shell. A trailing `\\` joins the next line to the
     command (`cat <<EOF \\` then `> gen.sh`), so the real body starts later than the
     scanner assumes.

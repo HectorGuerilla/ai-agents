@@ -757,11 +757,12 @@ def test_scan_file_print_only_unquoted_heredoc_clears_variable(tmp_path: Path, o
     assert _unquoted_lines(tmp_path, body) == []
 
 
-def test_scan_file_print_only_unquoted_heredoc_in_assignment_clears_variable(
+def test_scan_file_print_only_unquoted_heredoc_in_assignment_stays_flagged(
     tmp_path: Path,
 ) -> None:
+    """`$(` is nesting, so the body is not top level and is not cleared."""
     body = "msg=$(cat <<EOF\nUsage: $0 $dest\nEOF\n)\nrm $after\n"
-    assert _unquoted_lines(tmp_path, body) == [5]
+    assert _unquoted_lines(tmp_path, body) == [2, 5]
 
 
 @pytest.mark.parametrize(
@@ -784,6 +785,8 @@ def test_scan_file_print_only_unquoted_heredoc_in_assignment_clears_variable(
         "python3 <<EOF",
         "perl <<EOF",
         "git apply <<EOF",
+        "cat <<EOF >&3",
+        "cat <<EOF 1>&4",
     ],
 )
 def test_scan_file_unquoted_heredoc_that_writes_or_runs_body_stays_flagged(
@@ -845,19 +848,81 @@ def test_scan_file_plain_heredoc_after_closed_group_clears_variable(tmp_path: Pa
 @pytest.mark.parametrize(
     "body",
     [
+        # Nested help text stays flagged even with a clean closer: the accepted
+        # cost of the fail-closed depth-0 rule (D17).
         "usage() {\n  cat <<EOF\nUsage: $0 $dest\nEOF\n}\n",
         "usage() {\n  cat <<EOF\nUsage: $0 {a|b}\n}\nEOF\n}\n",
         "if true; then\n  cat <<EOF\nUsage: $0\nEOF\nfi\n",
         "(\n  cat <<EOF\nUsage: $0\nEOF\n) || exit 1\n",
         "msg=$(cat <<EOF\nUsage: $0\nEOF\n)\n",
         "f() {\n  cat <<EOF\nUsage: $0\nEOF\n} 2>&1\n",
+        # Review 2: untracked compound scopes.
+        "for x in a; do\n  cat <<EOF\nrm $target\nEOF\ndone > gen.sh\n",
+        "while true; do cat <<EOF\nrm $target\nEOF\ndone | bash\n",
+        "until false; do\ncat <<EOF\nrm $target\nEOF\ndone\n",
+        "if true; then\ncat <<EOF\nrm $target\nEOF\nfi > gen.sh\n",
+        "if true\nthen\ncat <<EOF\nrm $target\nEOF\nfi\n",
+        "case $1 in\n  a) cat <<EOF\nrm $target\nEOF\n  ;;\nesac > gen.sh\n",
+        "case $1 in\n  a)\n    cat <<EOF\nrm $target\nEOF\n    ;;\nesac | bash\n",
+        "select x in a; do cat <<EOF\nrm $target\nEOF\ndone > gen.sh\n",
+        "$(cat <<EOF\nrm $target\nEOF\n)\n",
+        # Review 3: heredoc bodies and multi-line quotes between opener and
+        # closer, and a call-site redirect on a function.
+        "{\ncat <<EOF\nrm $target\nEOF\ncat <<'X'\n}\nX\n} > gen.sh\n",
+        "{\ncat <<EOF\nrm $target\nEOF\necho '\n}\n'\n} > gen.sh\n",
+        "usage() {\ncat <<EOF\nrm $target\nEOF\n}\nusage > gen.sh\n",
     ],
 )
-def test_scan_file_plain_heredoc_in_group_with_clean_closer_clears_variable(
-    tmp_path: Path, body: str
+def test_scan_file_nested_unquoted_heredoc_stays_flagged(tmp_path: Path, body: str) -> None:
+    """Any open function, group, subshell, `$( )`, loop, `if`, or `case` keeps the body flagged."""
+    lines = body.splitlines()
+    body_line = next(i for i, text in enumerate(lines, 1) if text.startswith(("rm ", "Usage")))
+    assert body_line in _unquoted_lines(tmp_path, body)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        # Review 2: a `)` or `}` outside command position must not pop the
+        # guarding scope; an unmatched closer desyncs the tracker for the file.
+        "case $1 in\n  a) echo a ;;\nesac\n",
+        "echo a)\n",
+        "echo }\n",
+        "x=1 }\n",
+    ],
+)
+def test_scan_file_heredoc_after_unmatched_closer_stays_flagged(
+    tmp_path: Path, prefix: str
 ) -> None:
-    """Help text in a function body is the common shape. A clean closer keeps it plain."""
-    assert _unquoted_lines(tmp_path, body) == []
+    """After a closer that matches no opener, depth is unknown, so later bodies stay flagged."""
+    body = f"{prefix}cat <<EOF\nrm $target\nEOF\n"
+    target_line = prefix.count("\n") + 2
+    assert target_line in _unquoted_lines(tmp_path, body)
+
+
+def test_scan_file_heredoc_opener_inside_open_quote_stays_flagged(tmp_path: Path) -> None:
+    """An opener on a line that continues an open quote may be misread, so it is not cleared."""
+    body = "x='a\nb' ; cat <<EOF\nrm $target\nEOF\n"
+    assert 3 in _unquoted_lines(tmp_path, body)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "{ echo hi; }\n",
+        "if true; then echo hi; fi\n",
+        "for x in a b; do echo $x; done\n",
+        "f() { echo hi; }\n",
+        "echo done\n",
+    ],
+)
+def test_scan_file_top_level_heredoc_after_balanced_scopes_clears_variable(
+    tmp_path: Path, prefix: str
+) -> None:
+    """Balanced scopes earlier in the file leave the opener at depth 0."""
+    body = f"{prefix}cat <<EOF\nUsage: $0\nEOF\n"
+    body_line = prefix.count("\n") + 2
+    assert body_line not in _unquoted_lines(tmp_path, body)
 
 
 def test_scan_file_exec_without_stdout_redirect_keeps_plain_heredoc(tmp_path: Path) -> None:
