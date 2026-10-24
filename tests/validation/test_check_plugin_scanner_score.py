@@ -8,11 +8,13 @@ Coverage:
 - positive: a report at or above the minimum exits 0 and prints the score and
   examined package count; ``export_ref`` writes the committed tree.
 - negative: a report below the minimum exits 1 and names each check that lost
-  points; a missing report, a scanner timeout, a missing ``uv``, a report with
-  no integer score, and unreadable JSON exit 3; a bad ref, a directory outside
-  git, and a bad argument exit 2.
-- edge: ``export_ref`` leaves untracked files out, a score equal to the minimum
-  passes, and a report with no categories still summarizes.
+  points; a missing report, a scanner timeout, a git timeout while exporting, a
+  missing ``uv``, a report with no integer score, and unreadable JSON exit 3;
+  a bad ref, a directory outside git, and a bad argument exit 2.
+- edge: ``export_ref`` leaves untracked files out but keeps ``export-ignore``
+  paths and symlinks a clone has, and reads a ref other than HEAD; a score
+  equal to the minimum passes; a report with no categories still summarizes;
+  ``--help`` exits 0; a ``--min-score`` outside 1 to 100 exits 2.
 """
 
 from __future__ import annotations
@@ -125,10 +127,14 @@ def test_unreadable_report_is_external_error(
 def test_scanner_without_report_is_external_error(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def crashed(args: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[bytes]:
+    def crashed(
+        args: list[str], cwd: Path, timeout: float, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
         if args[0] == "uv":
             return subprocess.CompletedProcess(args, 1, b"", b"Traceback: boom")
-        return subprocess.run(args, cwd=cwd, capture_output=True, timeout=timeout, check=False)
+        return subprocess.run(
+            args, cwd=cwd, capture_output=True, timeout=timeout, check=False, env=env
+        )
 
     monkeypatch.setattr(gate, "_run", crashed)
     assert gate.main([]) == 3
@@ -138,10 +144,14 @@ def test_scanner_without_report_is_external_error(
 def test_scanner_timeout_is_external_error(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def slow(args: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[bytes]:
+    def slow(
+        args: list[str], cwd: Path, timeout: float, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
         if args[0] == "uv":
             raise subprocess.TimeoutExpired(args, timeout)
-        return subprocess.run(args, cwd=cwd, capture_output=True, timeout=timeout, check=False)
+        return subprocess.run(
+            args, cwd=cwd, capture_output=True, timeout=timeout, check=False, env=env
+        )
 
     monkeypatch.setattr(gate, "_run", slow)
     assert gate.main([]) == 3
@@ -149,10 +159,14 @@ def test_scanner_timeout_is_external_error(
 
 
 def test_missing_uv_is_external_error(git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def no_uv(args: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[bytes]:
+    def no_uv(
+        args: list[str], cwd: Path, timeout: float, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
         if args[0] == "uv":
             raise FileNotFoundError("uv")
-        return subprocess.run(args, cwd=cwd, capture_output=True, timeout=timeout, check=False)
+        return subprocess.run(
+            args, cwd=cwd, capture_output=True, timeout=timeout, check=False, env=env
+        )
 
     monkeypatch.setattr(gate, "_run", no_uv)
     assert gate.main([]) == 3
@@ -163,7 +177,9 @@ def test_scanner_command_uses_the_pinned_project(
 ) -> None:
     seen: list[list[str]] = []
 
-    def record(args: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[bytes]:
+    def record(
+        args: list[str], cwd: Path, timeout: float, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
         seen.append(args)
         return subprocess.CompletedProcess(args, 0, b"", b"")
 
@@ -199,6 +215,53 @@ def test_export_ref_writes_only_the_committed_tree(git_repo: Path, tmp_path: Pat
     gate.export_ref(git_repo, "HEAD", out)
     assert (out / "tracked.txt").read_text(encoding="utf-8") == "x"
     assert not (out / "untracked.txt").exists()
+
+
+def test_export_ref_keeps_what_a_clone_keeps(git_repo: Path, tmp_path: Path) -> None:
+    """``git archive`` would drop export-ignore paths; a clone does not."""
+    (git_repo / ".gitattributes").write_text(".gitattributes export-ignore\n", encoding="utf-8")
+    (git_repo / "link").symlink_to("tracked.txt")
+    _git(git_repo, "add", ".gitattributes", "link")
+    _git(git_repo, "commit", "-q", "-m", "attrs")
+    out = tmp_path / "out"
+    gate.export_ref(git_repo, "HEAD", out)
+    assert (out / ".gitattributes").is_file()
+    assert (out / "link").is_symlink()
+    assert (out / "link").read_text(encoding="utf-8") == "x"
+
+
+def test_export_ref_reads_the_named_ref(git_repo: Path, tmp_path: Path) -> None:
+    _git(git_repo, "tag", "first")
+    (git_repo / "later.txt").write_text("z", encoding="utf-8")
+    _git(git_repo, "add", "later.txt")
+    _git(git_repo, "commit", "-q", "-m", "later")
+    out = tmp_path / "out"
+    gate.export_ref(git_repo, "first", out)
+    assert (out / "tracked.txt").is_file()
+    assert not (out / "later.txt").exists()
+
+
+def test_export_timeout_is_external_error(git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def hung(
+        args: list[str], cwd: Path, timeout: float, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
+        if args[1] == "read-tree":
+            raise subprocess.TimeoutExpired(args, timeout)
+        return subprocess.run(
+            args, cwd=cwd, capture_output=True, timeout=timeout, check=False, env=env
+        )
+
+    monkeypatch.setattr(gate, "_run", hung)
+    assert gate.main([]) == 3
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "101"])
+def test_min_score_out_of_range_is_config_error(value: str) -> None:
+    assert gate.main(["--min-score", value]) == 2
+
+
+def test_help_exits_zero() -> None:
+    assert gate.main(["--help"]) == 0
 
 
 def test_summarize_tolerates_missing_categories() -> None:

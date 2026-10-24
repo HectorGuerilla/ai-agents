@@ -8,11 +8,14 @@ tree, so one new file anywhere can drop the listing below the bar. This gate
 runs the same scanner version locally, before a push, and
 ``.github/workflows/plugin-scanner.yml`` runs the pinned action in CI.
 
-What is scanned: the tree of a named ref (``HEAD`` by default), exported with
-``git archive`` into a temporary directory. A directory walk of the checkout
-would also score untracked files, caches, and virtualenvs that a fresh clone
-never has, so the same commit could pass here and fail in the catalog
-(.claude/rules/ci-scripts.md item 9).
+What is scanned: the tree of a named ref (``HEAD`` by default), read into a
+throwaway index and written out with ``git checkout-index``, which produces the
+files and symlinks a fresh clone has. A directory walk of the checkout would
+also score untracked files, caches, and virtualenvs that a clone never has, so
+the same commit could pass here and fail in the catalog
+(.claude/rules/ci-scripts.md item 9). ``git archive`` is not used: it drops
+``export-ignore`` paths such as ``.gitignore`` and ``.gitattributes``, which
+the catalog's clone keeps.
 
 Which scanner: ``build/plugin-scanner/uv.lock`` pins ``plugin-scanner`` by hash
 to the version the CI action verifies, and ``uv run --frozen`` installs exactly
@@ -38,11 +41,10 @@ Exit codes (ADR-035):
 from __future__ import annotations
 
 import argparse
-import io
 import json
+import os
 import subprocess
 import sys
-import tarfile
 import tempfile
 from pathlib import Path
 
@@ -65,8 +67,10 @@ class GateError(Exception):
         self.exit_code = exit_code
 
 
-def _run(args: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(args, cwd=cwd, capture_output=True, timeout=timeout, check=False)
+def _run(
+    args: list[str], cwd: Path, timeout: float, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(args, cwd=cwd, capture_output=True, timeout=timeout, check=False, env=env)
 
 
 def _repo_root() -> Path:
@@ -84,16 +88,29 @@ def _repo_root() -> Path:
 
 
 def export_ref(repo_root: Path, ref: str, destination: Path) -> None:
-    """Write the tree of ``ref`` into ``destination`` via ``git archive``."""
-    try:
-        result = _run(["git", "archive", "--format=tar", ref], repo_root, GIT_TIMEOUT_SECONDS)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise GateError(f"git archive {ref} failed: {exc}", _EXTERNAL_ERROR) from exc
-    if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", errors="replace").strip()
-        raise GateError(f"cannot export ref {ref!r}: {detail}", _CONFIG_ERROR)
-    with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
-        archive.extractall(destination, filter="data")
+    """Write the tree of ``ref`` into ``destination`` as a clone would.
+
+    A private ``GIT_INDEX_FILE`` keeps the real index untouched.
+    """
+    with tempfile.TemporaryDirectory(prefix="plugin-scanner-index-") as index_dir:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(index_dir) / "index")}
+        try:
+            read = _run(["git", "read-tree", ref], repo_root, GIT_TIMEOUT_SECONDS, env)
+            if read.returncode != 0:
+                detail = read.stderr.decode("utf-8", errors="replace").strip()
+                raise GateError(f"cannot export ref {ref!r}: {detail}", _CONFIG_ERROR)
+            prefix = f"{destination}{os.sep}"
+            write = _run(
+                ["git", "checkout-index", "--all", "--force", f"--prefix={prefix}"],
+                repo_root,
+                GIT_TIMEOUT_SECONDS,
+                env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GateError(f"exporting {ref} failed: {exc}", _EXTERNAL_ERROR) from exc
+        if write.returncode != 0:
+            detail = write.stderr.decode("utf-8", errors="replace").strip()
+            raise GateError(f"cannot write the tree of {ref!r}: {detail}", _EXTERNAL_ERROR)
 
 
 def run_scanner(repo_root: Path, tree: Path, report: Path) -> None:
@@ -156,7 +173,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--ref", default="HEAD", help="git ref whose tree is scanned")
     parser.add_argument("--min-score", type=int, default=DEFAULT_MIN_SCORE)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not 1 <= args.min_score <= 100:
+        parser.error(f"--min-score must be 1 to 100 (got {args.min_score})")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
