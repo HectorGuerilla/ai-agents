@@ -211,6 +211,38 @@ def test_missing_uv_is_external_error(git_repo: Path, monkeypatch: pytest.Monkey
     assert gate.main([]) == 3
 
 
+def test_scanner_that_cannot_start_is_external_error(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake(args: list[str]) -> None:
+        if args[0] == "uv":
+            raise PermissionError("uv is not executable")
+
+    _patch_run(monkeypatch, fake)
+    assert gate.main([]) == 3
+    assert "cannot start scanner install: uv is not executable" in capsys.readouterr().err
+
+
+def test_clean_pass_prints_no_empty_lost_header(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _fake_scanner(monkeypatch, _report(100))
+    assert gate.main([]) == 0
+    assert "Checks that lost points" not in capsys.readouterr().out
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+def test_run_timeout_tolerates_a_group_that_already_exited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def gone(_pid: int, _sig: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(gate.os, "killpg", gone)
+    with pytest.raises(subprocess.TimeoutExpired):
+        gate._run([sys.executable, "-c", "import time; time.sleep(0.5)"], tmp_path, 0.1)
+
+
 def test_nonzero_scanner_exit_with_a_report_is_reported_and_scored(
     git_repo: Path,
     tmp_path: Path,

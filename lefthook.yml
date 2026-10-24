@@ -671,7 +671,9 @@ pre-push:
           # so it reports its own exit 3 before this 3m cap; the cap stays under
           # the 240s container ceiling (test_lefthook_container_bound.py). The
           # group is parallel and the e2e smokes hold it at 20m, so the pre-push
-          # declared total does not move.
+          # declared total does not move. The first run installs the scanner
+          # from PyPI; offline with no cached install, it exits 3 and blocks the
+          # push (fix: uv sync --project build/plugin-scanner --frozen online).
           - name: plugin-scanner
             timeout: 3m
             run: uv run --frozen python scripts/validation/check_plugin_scanner_score.py

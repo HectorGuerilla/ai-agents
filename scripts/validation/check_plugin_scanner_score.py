@@ -42,7 +42,10 @@ Exit codes (ADR-035):
     0 - Score at or above the minimum (prints score and examined packages)
     1 - Score below the minimum (prints each check that lost points)
     2 - Config error (not in a git work tree, bad ref, bad argument)
-    3 - External error (scanner missing, crashed, timed out, or wrote no report)
+    3 - External error (scanner missing, crashed, timed out, or wrote no report).
+        The first run downloads the pinned scanner from PyPI, so an offline
+        machine with no cached install fails here; reconnect, or run
+        ``uv sync --project build/plugin-scanner --frozen`` once while online.
 """
 
 from __future__ import annotations
@@ -114,10 +117,13 @@ def _run(
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            if posix:
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:
-                proc.kill()
+            try:
+                if posix:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except ProcessLookupError:
+                pass  # the group exited between the timeout and the kill
             proc.communicate()
             raise
     return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
@@ -210,6 +216,8 @@ def run_scanner(repo_root: Path, tree: Path, report: Path, deadline: Deadline) -
         except subprocess.TimeoutExpired as exc:
             msg = f"scanner {step} exceeded the {TOTAL_BUDGET_SECONDS}s budget"
             raise GateError(msg, _EXTERNAL_ERROR) from exc
+        except OSError as exc:
+            raise GateError(f"cannot start scanner {step}: {exc}", _EXTERNAL_ERROR) from exc
         if step == "install" and result.returncode != 0:
             msg = f"scanner install failed (exit {result.returncode}): {_tail(result.stderr)}"
             raise GateError(msg, _EXTERNAL_ERROR)
@@ -291,7 +299,8 @@ def main(argv: list[str] | None = None) -> int:
     # Printed on a pass too: with a thin margin, the next lost check is a red
     # gate, so the reader should see what already costs points.
     stream = sys.stdout if score >= args.min_score else sys.stderr
-    print("Checks that lost points:", file=stream)
+    if lost:
+        print("Checks that lost points:", file=stream)
     for line in lost:
         print(line, file=stream)
     if score >= args.min_score:
