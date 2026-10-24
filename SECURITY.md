@@ -22,8 +22,8 @@ Do not open a public issue for a vulnerability. Include:
 - the host (Claude Code, GitHub Copilot CLI, Codex, Cursor) and its version;
 - steps to reproduce, and what an attacker gains.
 
-Expect an acknowledgment within 7 days. Confirmed issues are fixed on `main`
-and disclosed in a GitHub security advisory once the fix ships.
+Confirmed issues are fixed on `main` and disclosed in a GitHub security
+advisory once the fix ships.
 
 ## Scope
 

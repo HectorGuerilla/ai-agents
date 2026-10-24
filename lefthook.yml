@@ -666,11 +666,12 @@ pre-push:
           # scanner score of 80 on the whole tree, so this scores HEAD with the
           # scanner pinned in build/plugin-scanner/uv.lock; CI runs the same
           # version through .github/workflows/plugin-scanner.yml. Too slow for
-          # pre-commit: 48s standalone on 4 CPUs. The cap is the script's 150s
-          # scan budget plus git archive, and stays under the 240s container
-          # ceiling (test_lefthook_container_bound.py); the group is parallel and
-          # the e2e smokes hold it at 20m, so the pre-push declared total does
-          # not move.
+          # pre-commit: 48s standalone on 4 CPUs. The script spends one 165s
+          # budget across the tree export, the scanner install, and the scan,
+          # so it reports its own exit 3 before this 3m cap; the cap stays under
+          # the 240s container ceiling (test_lefthook_container_bound.py). The
+          # group is parallel and the e2e smokes hold it at 20m, so the pre-push
+          # declared total does not move.
           - name: plugin-scanner
             timeout: 3m
             run: uv run --frozen python scripts/validation/check_plugin_scanner_score.py

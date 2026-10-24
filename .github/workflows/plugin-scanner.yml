@@ -12,6 +12,10 @@
 # trusted (trust_repository_policy defaults to false), so the score here is the
 # score the catalog computes.
 #
+# Margin: this repository scored 80 (160 of 199 points) on 2026-10-24, so one
+# more lost check turns this red. The local twin prints every check that lost
+# points, on a pass too.
+#
 # No path filter: the score reads the whole tree, so any file can move it
 # (.claude/rules/ci-scripts.md, "Path filters gate the diff, never the tree").
 #

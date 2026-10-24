@@ -19,12 +19,19 @@ the catalog's clone keeps.
 
 Which scanner: ``build/plugin-scanner/uv.lock`` pins ``plugin-scanner`` by hash
 to the version the CI action verifies, and ``uv run --frozen`` installs exactly
-that. Repository scanner config (``.plugin-scanner.toml``) is never read: the
-catalog runs with ``trust_repository_policy`` false, so a suppression would
-raise only the local score.
+that. Repository scanner config (``.plugin-scanner.toml``) is deleted from the
+exported tree before the scan: run directly, the scanner would apply it, but
+the catalog runs with ``trust_repository_policy`` false, so a suppression
+would raise only the local score.
 
-The scanner run is bounded by ``SCAN_BUDGET_SECONDS``, below the lefthook cap,
-so a slow run ends with exit 3 and a reason instead of a lefthook kill.
+Every step shares ``TOTAL_BUDGET_SECONDS``, below the lefthook cap, so a slow
+run ends with exit 3 and a reason instead of a lefthook kill. The scanner runs
+in its own process group, and a timeout kills the whole group.
+
+Review trigger: when awesome-ai-plugins changes its pinned action commit,
+scanner version, or threshold, update the action pin in
+``.github/workflows/plugin-scanner.yml``, the version in
+``build/plugin-scanner/pyproject.toml`` (then ``uv lock``), and re-measure.
 
 CLI::
 
@@ -43,15 +50,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 DEFAULT_MIN_SCORE = 80
-SCAN_BUDGET_SECONDS = 150
-GIT_TIMEOUT_SECONDS = 60
+# One deadline covers every step, so the script reports its own exit 3 before
+# the 3m lefthook cap kills it (.claude/rules/ci-scripts.md item 19).
+TOTAL_BUDGET_SECONDS = 165
+GIT_TIMEOUT_SECONDS = 30
 SCANNER_PROJECT = Path("build") / "plugin-scanner"
+# The scanner auto-discovers these in the scanned tree when run directly. The
+# catalog's action does not trust them, so they are removed before scanning.
+REPOSITORY_CONFIG_FILES = (".plugin-scanner.toml", ".codex-plugin-scanner.toml")
 
 _OK = 0
 _BELOW = 1
@@ -67,16 +81,56 @@ class GateError(Exception):
         self.exit_code = exit_code
 
 
+class Deadline:
+    """Seconds left of one budget shared by every subprocess."""
+
+    def __init__(self, seconds: float) -> None:
+        self._end = time.monotonic() + seconds
+
+    def remaining(self, cap: float | None = None) -> float:
+        left = self._end - time.monotonic()
+        if left <= 0:
+            raise GateError(f"the {TOTAL_BUDGET_SECONDS}s budget ran out", _EXTERNAL_ERROR)
+        return left if cap is None else min(left, cap)
+
+
 def _run(
     args: list[str], cwd: Path, timeout: float, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(args, cwd=cwd, capture_output=True, timeout=timeout, check=False, env=env)
+    """Run ``args``; on timeout kill its whole process group, not only the child.
+
+    ``subprocess.run`` kills only the direct child, which here is ``uv``; the
+    scanner it started would keep running after the gate gave up.
+    """
+    posix = os.name == "posix"
+    with subprocess.Popen(
+        args,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=posix,
+    ) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if posix:
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+            proc.communicate()
+            raise
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 
-def _repo_root() -> Path:
+def _repo_root(deadline: Deadline) -> Path:
     """Return the work tree root, after confirming cwd is inside it."""
     try:
-        result = _run(["git", "rev-parse", "--show-toplevel"], Path.cwd(), GIT_TIMEOUT_SECONDS)
+        result = _run(
+            ["git", "rev-parse", "--show-toplevel"],
+            Path.cwd(),
+            deadline.remaining(GIT_TIMEOUT_SECONDS),
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GateError(f"cannot run git: {exc}", _CONFIG_ERROR) from exc
     if result.returncode != 0:
@@ -87,15 +141,21 @@ def _repo_root() -> Path:
     return root
 
 
-def export_ref(repo_root: Path, ref: str, destination: Path) -> None:
+def export_ref(repo_root: Path, ref: str, destination: Path, deadline: Deadline) -> None:
     """Write the tree of ``ref`` into ``destination`` as a clone would.
 
-    A private ``GIT_INDEX_FILE`` keeps the real index untouched.
+    A private ``GIT_INDEX_FILE`` keeps the real index untouched. Repository
+    scanner config is then deleted from the copy (see REPOSITORY_CONFIG_FILES).
     """
     with tempfile.TemporaryDirectory(prefix="plugin-scanner-index-") as index_dir:
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(index_dir) / "index")}
         try:
-            read = _run(["git", "read-tree", ref], repo_root, GIT_TIMEOUT_SECONDS, env)
+            read = _run(
+                ["git", "read-tree", "--end-of-options", ref],
+                repo_root,
+                deadline.remaining(GIT_TIMEOUT_SECONDS),
+                env,
+            )
             if read.returncode != 0:
                 detail = read.stderr.decode("utf-8", errors="replace").strip()
                 raise GateError(f"cannot export ref {ref!r}: {detail}", _CONFIG_ERROR)
@@ -103,7 +163,7 @@ def export_ref(repo_root: Path, ref: str, destination: Path) -> None:
             write = _run(
                 ["git", "checkout-index", "--all", "--force", f"--prefix={prefix}"],
                 repo_root,
-                GIT_TIMEOUT_SECONDS,
+                deadline.remaining(GIT_TIMEOUT_SECONDS),
                 env,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -111,17 +171,26 @@ def export_ref(repo_root: Path, ref: str, destination: Path) -> None:
         if write.returncode != 0:
             detail = write.stderr.decode("utf-8", errors="replace").strip()
             raise GateError(f"cannot write the tree of {ref!r}: {detail}", _EXTERNAL_ERROR)
+    for name in REPOSITORY_CONFIG_FILES:
+        (destination / name).unlink(missing_ok=True)
 
 
-def run_scanner(repo_root: Path, tree: Path, report: Path) -> None:
-    """Run the pinned scanner over ``tree`` and write its JSON report."""
-    args = [
-        "uv",
-        "run",
-        "--project",
-        str(repo_root / SCANNER_PROJECT),
-        "--frozen",
-        "--quiet",
+def _uv(repo_root: Path, *args: str) -> list[str]:
+    return ["uv", *args, "--project", str(repo_root / SCANNER_PROJECT), "--frozen", "--quiet"]
+
+
+def _tail(stream: bytes) -> str:
+    return stream.decode("utf-8", errors="replace").strip()[-2000:]
+
+
+def run_scanner(repo_root: Path, tree: Path, report: Path, deadline: Deadline) -> None:
+    """Install the pinned scanner, run it over ``tree``, and write its JSON report.
+
+    The install is its own step so a slow first download reads as an install
+    failure, not as a slow scan.
+    """
+    scan = [
+        *_uv(repo_root, "run", "--no-sync"),
         "plugin-scanner",
         "scan",
         str(tree),
@@ -132,17 +201,27 @@ def run_scanner(repo_root: Path, tree: Path, report: Path) -> None:
         "--fail-on-severity",
         "none",
     ]
-    try:
-        result = _run(args, repo_root, SCAN_BUDGET_SECONDS)
-    except FileNotFoundError as exc:
-        raise GateError("uv is not installed; see build/plugin-scanner", _EXTERNAL_ERROR) from exc
-    except subprocess.TimeoutExpired as exc:
-        msg = f"scanner exceeded its {SCAN_BUDGET_SECONDS}s budget"
-        raise GateError(msg, _EXTERNAL_ERROR) from exc
+    for step, args in (("install", _uv(repo_root, "sync")), ("scan", scan)):
+        try:
+            result = _run(args, repo_root, deadline.remaining())
+        except FileNotFoundError as exc:
+            msg = "uv is not installed; see build/plugin-scanner"
+            raise GateError(msg, _EXTERNAL_ERROR) from exc
+        except subprocess.TimeoutExpired as exc:
+            msg = f"scanner {step} exceeded the {TOTAL_BUDGET_SECONDS}s budget"
+            raise GateError(msg, _EXTERNAL_ERROR) from exc
+        if step == "install" and result.returncode != 0:
+            msg = f"scanner install failed (exit {result.returncode}): {_tail(result.stderr)}"
+            raise GateError(msg, _EXTERNAL_ERROR)
     if not report.is_file():
-        detail = result.stderr.decode("utf-8", errors="replace").strip()[-2000:]
-        msg = f"scanner wrote no report (exit {result.returncode}): {detail}"
+        msg = f"scanner wrote no report (exit {result.returncode}): {_tail(result.stderr)}"
         raise GateError(msg, _EXTERNAL_ERROR)
+    if result.returncode != 0:
+        print(
+            f"plugin-scanner: scanner exited {result.returncode} but wrote a report: "
+            f"{_tail(result.stderr)}",
+            file=sys.stderr,
+        )
 
 
 def summarize(report: dict[str, object]) -> tuple[int, int, list[str]]:
@@ -184,13 +263,15 @@ def main(argv: list[str] | None = None) -> int:
         args = _parse_args(argv)
     except SystemExit as exc:
         return _CONFIG_ERROR if exc.code else _OK
+    started = time.monotonic()
+    deadline = Deadline(TOTAL_BUDGET_SECONDS)
     try:
-        repo_root = _repo_root()
+        repo_root = _repo_root(deadline)
         with tempfile.TemporaryDirectory(prefix="plugin-scanner-") as work:
             tree = Path(work) / "tree"
             report_path = Path(work) / "report.json"
-            export_ref(repo_root, args.ref, tree)
-            run_scanner(repo_root, tree, report_path)
+            export_ref(repo_root, args.ref, tree, deadline)
+            run_scanner(repo_root, tree, report_path, deadline)
             try:
                 report = json.loads(report_path.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
@@ -202,12 +283,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"plugin-scanner: {exc}", file=sys.stderr)
         return exc.exit_code
 
-    print(f"plugin-scanner: score={score} min={args.min_score} ref={args.ref} packages={examined}")
+    elapsed = time.monotonic() - started
+    print(
+        f"plugin-scanner: score={score} min={args.min_score} margin={score - args.min_score} "
+        f"ref={args.ref} packages={examined} elapsed={elapsed:.1f}s"
+    )
+    # Printed on a pass too: with a thin margin, the next lost check is a red
+    # gate, so the reader should see what already costs points.
+    stream = sys.stdout if score >= args.min_score else sys.stderr
+    print("Checks that lost points:", file=stream)
+    for line in lost:
+        print(line, file=stream)
     if score >= args.min_score:
         return _OK
-    print("Checks that lost points:", file=sys.stderr)
-    for line in lost:
-        print(line, file=sys.stderr)
     print(
         f"plugin-scanner: score {score} is below {args.min_score}; the "
         "awesome-ai-plugins listing requires 80 (SCANNER_GUIDE.md).",
