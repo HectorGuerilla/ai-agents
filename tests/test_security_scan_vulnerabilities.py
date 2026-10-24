@@ -729,10 +729,154 @@ def test_scan_file_flags_command_substitution_inside_multiline_double_quotes(
     assert _unquoted_lines(tmp_path, body) == [2]
 
 
-def test_scan_file_flags_unquoted_heredoc_body_expansion_as_before(tmp_path: Path) -> None:
-    """An unquoted delimiter expands the body. Keep the per-line behavior."""
-    body = "cat <<EOF\nrm $target\nEOF\n"
+def test_scan_file_unquoted_heredoc_to_stdout_clears_variable(tmp_path: Path) -> None:
+    """Owner decision D17 (2026-10-24), issue #6624 shape 2.
+
+    `cat <<EOF` with no redirect only prints. Bash does no word splitting or
+    globbing in a here-document body, so a `$var` there is help text, not an
+    unquoted argument. This replaces the earlier pin that flagged it.
+    """
+    body = "cat <<EOF\nUsage: $0 --dest $target\nEOF\nrm $after\n"
+    assert _unquoted_lines(tmp_path, body) == [4]
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "cat <<EOF",
+        "cat <<-EOF",
+        "echo <<EOF",
+        "printf '%s' <<EOF",
+        "cat <<EOF >&2",
+        "cat <<EOF 2>&1",
+        "cat <<EOF | grep Usage",
+    ],
+)
+def test_scan_file_print_only_unquoted_heredoc_clears_variable(tmp_path: Path, opener: str) -> None:
+    body = f"{opener}\nUsage: $0 $dest\nEOF\n"
+    assert _unquoted_lines(tmp_path, body) == []
+
+
+def test_scan_file_print_only_unquoted_heredoc_in_assignment_clears_variable(
+    tmp_path: Path,
+) -> None:
+    body = "msg=$(cat <<EOF\nUsage: $0 $dest\nEOF\n)\nrm $after\n"
+    assert _unquoted_lines(tmp_path, body) == [5]
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        # The #6624 probe: the redirect writes expanded text that bash runs next.
+        "cat > gen.sh <<EOF",
+        "cat <<EOF > gen.sh",
+        "cat <<EOF >> gen.sh",
+        "cat >>gen.sh <<EOF",
+        "cat <<EOF &> gen.sh",
+        "cat <<EOF >&gen.sh",
+        "cat <<EOF >| gen.sh",
+        "cat <<EOF >(tee gen.sh)",
+        "tee gen.sh <<EOF",
+        "cat <<EOF | tee gen.sh",
+        "cat <<EOF | sponge gen.sh",
+        "sort -o gen.sh <<EOF",
+        "cat <<EOF | sed 's/a/b/'",
+        "python3 <<EOF",
+        "perl <<EOF",
+        "git apply <<EOF",
+    ],
+)
+def test_scan_file_unquoted_heredoc_that_writes_or_runs_body_stays_flagged(
+    tmp_path: Path, opener: str
+) -> None:
+    body = f"{opener}\nrm $target\nEOF\n"
     assert _unquoted_lines(tmp_path, body) == [2]
+
+
+def test_scan_file_unquoted_heredoc_with_variable_reader_stays_flagged(tmp_path: Path) -> None:
+    """A variable command word could be a shell, so the body is not plain."""
+    body = "$reader <<EOF\nrm $target\nEOF\n"
+    assert _unquoted_lines(tmp_path, body) == [1, 2]
+
+
+def test_scan_file_unquoted_heredoc_with_continued_opener_stays_flagged(tmp_path: Path) -> None:
+    """A trailing backslash joins `> gen.sh` to the opener, so line 3 is the real body."""
+    body = "cat <<EOF \\\n> gen.sh\nrm $target\nEOF\n"
+    assert 3 in _unquoted_lines(tmp_path, body)
+
+
+def test_scan_file_unquoted_heredoc_sharing_opener_with_shell_stays_flagged(
+    tmp_path: Path,
+) -> None:
+    """`bash <<B` shares the opener line with `cat <<A`, so neither body is plain."""
+    body = "cat <<A; bash <<B\nrm $one\nA\nrm $two\nB\n"
+    assert _unquoted_lines(tmp_path, body) == [2, 4]
+
+
+def test_scan_file_plain_heredoc_line_continuation_joins_substitution(tmp_path: Path) -> None:
+    """A backslash at end of line joins `$` and `(`, so the next line runs as shell."""
+    body = "cat <<EOF\nRun $\\\n(rm $target)\nEOF\n"
+    assert 3 in _unquoted_lines(tmp_path, body)
+
+
+def test_scan_file_issue_6624_probe_generated_script_stays_flagged(tmp_path: Path) -> None:
+    """`cat > gen.sh <<EOF` then `bash gen.sh` ran injected text in the #6624 probe."""
+    body = "cat > gen.sh <<EOF\nrm $target\nEOF\nbash gen.sh\n"
+    assert _unquoted_lines(tmp_path, body) == [2]
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "bash <<EOF",
+        "sh <<EOF",
+        "cat <<EOF | bash",
+        "cat <<EOF | sh -s",
+        "eval $(cat <<EOF",
+        "ssh host bash <<EOF",
+        "source /dev/stdin <<EOF",
+    ],
+)
+def test_scan_file_shell_fed_unquoted_heredoc_stays_flagged(tmp_path: Path, opener: str) -> None:
+    body = f"{opener}\nrm $target\nEOF\n"
+    assert _unquoted_lines(tmp_path, body) == [2]
+
+
+@pytest.mark.parametrize(
+    ("line", "flagged"),
+    [
+        ("Run $(rm $target) now", True),
+        ("Run `rm $target` now", True),
+        ("Run $(echo $a $(rm $b)) now", True),
+        ("Total: $(( n + $count ))", True),
+        ("Value ${x:-$(rm $y)}", True),
+        ("Escaped \\$(rm $target) and \\`rm $target\\`", False),
+        ('Quoted $(echo ")" $target) end', True),
+        ("Plain $var and ${var} text", False),
+    ],
+)
+def test_scan_file_plain_heredoc_keeps_substitutions_visible(
+    tmp_path: Path, line: str, flagged: bool
+) -> None:
+    """`$( )` and backticks run commands even when the body only prints."""
+    body = f"cat <<EOF\n{line}\nEOF\n"
+    assert _unquoted_lines(tmp_path, body) == ([2] if flagged else [])
+
+
+def test_scan_file_plain_heredoc_open_substitution_scans_later_lines(tmp_path: Path) -> None:
+    """A substitution that spans lines must not hide a `$var` after it."""
+    body = "cat <<EOF\nRun $(echo hi\nrm $target)\nrm $more\nEOF\nrm $after\n"
+    assert _unquoted_lines(tmp_path, body) == [3, 4, 6]
+
+
+def test_scan_file_plain_heredoc_ends_at_terminator(tmp_path: Path) -> None:
+    body = "cat <<-EOF\n\tUsage: $0\n\tEOF\nrm $target\n"
+    assert _unquoted_lines(tmp_path, body) == [4]
+
+
+def test_scan_file_plain_heredoc_apostrophe_does_not_hide_later_code(tmp_path: Path) -> None:
+    body = "cat <<EOF\ndon't panic, it's $0\nEOF\nrm $target\n"
+    assert _unquoted_lines(tmp_path, body) == [4]
 
 
 def test_scan_file_flags_code_after_heredoc_terminator(tmp_path: Path) -> None:
@@ -777,9 +921,14 @@ def test_scan_file_bare_punctuation_or_digit_delimiter_is_a_heredoc(
 
 
 def test_scan_file_digit_delimiter_body_keeps_per_line_scan(tmp_path: Path) -> None:
-    """An unquoted delimiter expands the body, so a variable there is still flagged."""
-    body = "echo 1<<2\nrm $inbody\n2\nrm $after\n"
+    """A shell reader expands the unquoted body, so a variable there is still flagged."""
+    body = "sh 1<<2\nrm $inbody\n2\nrm $after\n"
     assert _unquoted_lines(tmp_path, body) == [2, 4]
+
+
+def test_scan_file_digit_delimiter_print_only_body_is_plain(tmp_path: Path) -> None:
+    body = "echo 1<<2\nUsage: $inbody\n2\nrm $after\n"
+    assert _unquoted_lines(tmp_path, body) == [4]
 
 
 @pytest.mark.parametrize(

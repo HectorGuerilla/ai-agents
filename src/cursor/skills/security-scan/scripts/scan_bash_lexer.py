@@ -10,8 +10,15 @@ that only inert readers (cat, tee, python, and the like) consume.
 import re
 from collections import deque
 from collections.abc import Sequence
+from dataclasses import replace
 
-from scan_bash_heredoc import Heredoc, begin_heredoc, is_terminator, mark_shell_fed
+from scan_bash_heredoc import (
+    Heredoc,
+    begin_heredoc,
+    blank_outside_substitutions,
+    is_terminator,
+    mark_shell_fed,
+)
 
 # Bash lexer modes. A stack of these tracks quote and substitution nesting.
 _MODE_SINGLE = "single"
@@ -401,12 +408,23 @@ def scrub_bash_line(line: str) -> str:
     return line if stack else text
 
 
-def _scrub_heredoc_body(line: str, heredoc: Heredoc) -> str:
-    """Blank an inert body line (quoted delimiter, inert readers only). Else scrub per line."""
-    if heredoc.inert and not is_terminator(line, heredoc):
+def _scrub_heredoc_body(line: str, heredoc: Heredoc) -> tuple[str, Heredoc]:
+    """Scrub one body line; return it with the here-document state for the next line.
+
+    A quoted body read by inert readers is blanked. A plain body (unquoted
+    delimiter, print-only reader, no file written) is blanked except `$( )` and
+    backtick text. If a substitution is still open at end of line, the state drops
+    to per-line scanning so later lines stay visible. Anything else scrubs per line.
+    """
+    if is_terminator(line, heredoc):
+        return scrub_bash_line(line), heredoc
+    if heredoc.inert:
         body = line.rstrip("\n")
-        return " " * len(body) + line[len(body) :]
-    return scrub_bash_line(line)
+        return " " * len(body) + line[len(body) :], heredoc
+    if heredoc.plain:
+        text, resolved = blank_outside_substitutions(line)
+        return text, heredoc if resolved else replace(heredoc, plain=False)
+    return scrub_bash_line(line), heredoc
 
 
 def scrub_bash_lines(lines: Sequence[str]) -> list[str]:
@@ -420,7 +438,11 @@ def scrub_bash_lines(lines: Sequence[str]) -> list[str]:
     shell (`bash <<'X'`, `ssh host bash <<'X'`, `<<'X' | sh`, `eval`,
     `source /dev/stdin`), the body is code and is scrubbed one line at a time.
     The body of an unquoted-delimiter here-document is scrubbed one line at a
-    time, as before. A reader on a later line (`<<'X' |` then `bash`) is not
+    time, unless it is plain: only a print-only reader (`cat`, `echo`, `printf`)
+    consumes it and the opener has no `>` redirect or `tee`. A `$var` in a plain
+    body is not a word-split argument, so it is blanked; `$( )` and backtick text
+    stays visible. `cat > gen.sh <<EOF` is not plain, since `bash gen.sh` runs the
+    expanded text. A reader on a later line (`<<'X' |` then `bash`) is not
     seen, so that body stays blanked.
 
     It fails open only on unresolved state. If a quote or here-document is still
@@ -440,7 +462,8 @@ def scrub_bash_lines(lines: Sequence[str]) -> list[str]:
     body_from: int | None = None
     for index, line in enumerate(lines):
         if active is not None:
-            result.append(_scrub_heredoc_body(line, active))
+            text, active = _scrub_heredoc_body(line, active)
+            result.append(text)
             if is_terminator(line, active):
                 active = queue.popleft() if queue else None
                 if active is None:
